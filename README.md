@@ -1,12 +1,44 @@
 # sp9-ov5693-dkms
 
-> _(one-line description — fill me)_
+> Patched OV5693 camera sensor driver, packaged for DKMS — fixes the front camera on
+> Microsoft Surface devices that pair an OV5693 with an Intel IPU6.
+
+## The problem
+
+The sensor probes and binds, `cam -l` lists the camera, and then every capture hangs
+forever with:
+
+```
+intel_ipu6_isys.isys intel_ipu6.isys.40: stream stop time out
+intel_ipu6_isys.isys intel_ipu6.isys.40: stream close time out
+```
+
+The stock driver's stream-enable path writes only `SW_STREAM (0x0100)`; it never
+programs `MIPI_CTRL00 (0x4800)`. The IPU6 CSI-2 receiver never locks its D-PHY, so no
+frame ever arrives.
+
+## The fix
+
+Write `MIPI_CTRL00 = 0x2d` immediately before stream-on. Two patches on top of upstream
+v6.19 `drivers/media/i2c/ov5693.c`:
+
+| Patch | What |
+|---|---|
+| `patches/0001-add-OVTI5693-acpi-hid.patch` | the `OVTI5693` ACPI HID Surface firmware uses (carried from linux-surface, so the DKMS module binds like the stock one) |
+| `patches/0002-write-mipi-ctrl00-on-stream-enable.patch` | the `0x4800` write, exposed as the `mipi_ctrl00` module parameter |
 
 ## Status
 
 - created: 2026-08-15
+- developed and verified on: Surface Pro 9, Ubuntu 26.04, kernel 6.19.8-surface-3
+- applies to: any Surface with an OV5693 + IPU6; nothing here is model-specific
 
 ## Getting started
+
+```bash
+sudo ./scripts/install-and-test.sh   # build, install, load, verify — rolls back on failure
+sudo ./scripts/uninstall.sh          # back to the stock in-tree module
+```
 
 See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for setup, run, and test commands.
 
@@ -14,3 +46,9 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for setup, run, and test commands.
 
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — how to run, test, and debug the project
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — architecture decision records
+
+## Credit
+
+Root cause and the `0x4800 = 0x2d` value come from
+[linux-surface discussion #2198](https://github.com/linux-surface/linux-surface/discussions/2198).
+The driver itself is GPL-2.0, © 2013 Intel Corporation and the authors named in its header.

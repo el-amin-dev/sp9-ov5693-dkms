@@ -1,0 +1,24 @@
+# Templated user service: one instance per camera.
+#   camera-bridge@front  -> /dev/video42, "Surface Front Camera"
+#   camera-bridge@back   -> /dev/video43, "Surface Back Camera"
+#
+# Installed by ./install.sh. Manually:
+#   mkdir -p ~/.config/systemd/user
+#   sed "s|%REPO%|$PWD|" scripts/camera-bridge@.service > ~/.config/systemd/user/camera-bridge@.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now camera-bridge@front camera-bridge@back
+
+[Unit]
+Description=Publish the Surface %i camera as a V4L2 device
+# PipeWire owns the libcamera source this bridge reads from.
+After=pipewire.service wireplumber.service
+Wants=pipewire.service wireplumber.service
+
+[Service]
+Type=simple
+ExecStart=%REPO%/scripts/camera-bridge.sh run %i
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -102,27 +102,50 @@ through libcamera's software ISP, which PipeWire publishes as a `Video/Source`.
 Ordinary apps do not see that, so a bridge republishes it as a normal V4L2 device.
 
 ```bash
-# one-time, needs root
-sudo apt-get install -y v4l2loopback-dkms v4l2loopback-utils
-sudo ./scripts/camera-bridge-setup.sh --persist    # /dev/video42, "Surface Front Camera"
+./install.sh          # does all of it: packages, module, devices, services
+./install.sh --check  # report state only
+./uninstall.sh        # undo
+```
 
-# the feeder, as a supervised user service (starts at login)
+Manually, if you prefer the steps:
+
+```bash
+sudo apt-get install -y v4l2loopback-dkms v4l2loopback-utils v4l-utils \
+    gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+    gstreamer1.0-pipewire pipewire-bin libcamera-tools
+sudo ./scripts/camera-bridge-setup.sh --persist   # /dev/video42 + /dev/video43
+
 mkdir -p ~/.config/systemd/user
-sed "s|%REPO%|$PWD|" scripts/camera-bridge.service > ~/.config/systemd/user/camera-bridge.service
+sed "s|%REPO%|$PWD|" "scripts/camera-bridge@.service" > ~/.config/systemd/user/camera-bridge@.service
 systemctl --user daemon-reload
-systemctl --user enable --now camera-bridge
+systemctl --user enable --now camera-bridge@front camera-bridge@back
 ```
 
 Check it:
 
 ```bash
-systemctl --user status camera-bridge
-v4l2-ctl -d /dev/video42 --list-formats-ext      # expect one: YUYV 1280x720 @30fps
 ./scripts/camera-bridge.sh status
+systemctl --user status camera-bridge@front
+v4l2-ctl -d /dev/video42 --list-formats-ext      # expect one: YUYV 1280x720 @30fps
 ```
 
-After this, Chrome, Firefox, Zoom, Teams and GNOME Snapshot see a single camera
-named **Surface Front Camera**. No browser flags, no `chrome://flags`, no portal.
+After this, Chrome, Firefox, Zoom, Teams and GNOME Snapshot see two cameras,
+**Surface Front Camera** and **Surface Back Camera**. No browser flags, no
+`chrome://flags`, no portal.
+
+### "Device is not a output device"
+
+`exclusive_caps=1` means a loopback flips to capture-only once a consumer opens it,
+after which the feeder can no longer attach. If a bridge fails with this, something
+else grabbed the device first -- usually a browser tab left open, or an orphaned
+`gst-launch` from a previous run:
+
+```bash
+for p in /proc/[0-9]*; do ls -l $p/fd 2>/dev/null | grep -q video42 && \
+  echo "$p $(cat $p/comm)"; done
+```
+
+Close the consumer, then `systemctl --user restart camera-bridge@front`.
 
 ### Why a loopback rather than the PipeWire path
 
@@ -173,8 +196,8 @@ for. Do not "simplify" the bridge by capturing at the output size.
 ### Undoing all of it
 
 ```bash
-systemctl --user disable --now camera-bridge
-rm ~/.config/systemd/user/camera-bridge.service && systemctl --user daemon-reload
+systemctl --user disable --now camera-bridge@front camera-bridge@back
+rm ~/.config/systemd/user/camera-bridge@.service && systemctl --user daemon-reload
 sudo ./scripts/camera-bridge-setup.sh --undo      # unload module, remove /etc files
 sudo apt-get remove v4l2loopback-dkms v4l2loopback-utils   # optional
 ```

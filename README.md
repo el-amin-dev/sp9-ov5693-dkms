@@ -36,14 +36,50 @@ v6.19 `drivers/media/i2c/ov5693.c`:
 ## Getting started
 
 ```bash
-./install.sh              # everything: kernel module, loopback device, bridge service
-./install.sh --check      # report state, change nothing
-./install.sh --uninstall  # undo it
+git clone https://github.com/el-amin-dev/sp9-ov5693-dkms
+cd sp9-ov5693-dkms
+./install.sh
 ```
 
-Run it as your normal user — it calls `sudo` only for the steps that need it. Afterwards
-every app (Chrome, Firefox, Zoom, Teams, GNOME Snapshot) sees one camera named
-**Surface Front Camera**, with no browser flags to set.
+That is the whole thing. Run it as your **normal user** — it calls `sudo` itself for
+the steps that need root, and refuses to run as root because the services and the
+PipeWire session belong to your login user.
+
+```bash
+./install.sh --check   # report state, change nothing
+./uninstall.sh         # undo it
+./uninstall.sh --all   # also remove the patched module and the packages it added
+```
+
+Afterwards every app — Chrome, Firefox, Zoom, Teams, GNOME Snapshot — sees two
+ordinary webcams, **Surface Front Camera** and **Surface Back Camera**, with no
+browser flags to set. Verify at <https://webcamtests.com>.
+
+### What it installs
+
+Packages, via apt (the installer aborts if apt would *remove* anything):
+
+| Package | Why |
+|---|---|
+| `dkms`, `build-essential`, `linux-headers-$(uname -r)` | build the two out-of-tree modules |
+| `v4l2loopback-dkms`, `v4l2loopback-utils` | the virtual webcam devices |
+| `gstreamer1.0-tools`, `-plugins-base`, `-plugins-good`, `-pipewire` | `pipewiresrc`, `videoconvert`/`videoscale`, `v4l2sink` |
+| `v4l-utils` | `v4l2-ctl`, to find and inspect the devices |
+| `pipewire-bin` | `pw-dump`, to locate the camera nodes |
+| `libcamera-tools` | `cam`, used by the test scripts |
+
+Outside the repo it creates only these, all removed by `./uninstall.sh`:
+
+- `~/.config/systemd/user/camera-bridge@.service` — one instance per camera, started at login
+- `/etc/modprobe.d/v4l2loopback-surface.conf` and `/etc/modules-load.d/v4l2loopback-surface.conf`
+
+It never touches `/boot`, the bootloader, or any kernel package, and never needs a reboot.
+
+### Requirements
+
+- a Surface with an OV5693 front camera behind an Intel IPU6 (developed on the Pro 9)
+- a kernel with the linux-surface camera patches (`linux-surface` 6.19 or newer)
+- Secure Boot **off**, or the DKMS modules signed with an enrolled MOK key
 
 Just the kernel module, without the userspace plumbing:
 

@@ -1,141 +1,148 @@
 #!/usr/bin/env bash
-# Publish the libcamera/PipeWire front camera as an ordinary V4L2 webcam.
+# Publish a libcamera/PipeWire camera as an ordinary V4L2 webcam.
 #
-#   ./scripts/camera-bridge.sh start     # begin feeding /dev/video<N>
-#   ./scripts/camera-bridge.sh stop
-#   ./scripts/camera-bridge.sh status
+#   ./scripts/camera-bridge.sh start front
+#   ./scripts/camera-bridge.sh run back        # foreground, for systemd
+#   ./scripts/camera-bridge.sh stop front
+#   ./scripts/camera-bridge.sh status          # both cameras
 #
-# Why this exists: the sensor only reaches userspace through libcamera's software
-# ISP, which PipeWire exposes as a Video/Source offering RGBx/BGRx only, reachable
+# Why this exists: these sensors reach userspace only through libcamera's software
+# ISP, which PipeWire exposes as a Video/Source offering RGBx/BGRx and reachable
 # just via the xdg camera portal. Chrome asks the portal from a windowless utility
 # process, so GNOME refuses to show the permission dialog ("Only the focused app
 # is allowed to show a system access dialog") and access is denied outright. A
 # v4l2loopback device sidesteps all of that: every app -- Chrome, Firefox, Zoom,
 # Teams, GNOME Snapshot -- speaks plain V4L2, with no flags and no portal.
 #
-# Two sensor quirks are handled here rather than left to the client:
-#   * below ~1296px wide the software ISP returns all-zero (black) buffers, so the
-#     capture side is pinned to 1920x1080 no matter what the client asks for;
-#   * clients overwhelmingly default to 640x480, which would be black, so the
-#     loopback advertises a single fixed 1280x720 YUY2 format that every client
-#     accepts, downscaled from the good 1080p capture.
+# Two quirks are handled here rather than left to the client:
+#   * on the front sensor (ov5693) the software ISP returns all-zero buffers below
+#     ~1296px wide, so capture is pinned to 1920x1080 whatever the client asks for;
+#   * clients overwhelmingly default to 640x480, which would be black, so each
+#     loopback advertises one fixed 1280x720 YUY2 mode, downscaled from that
+#     capture.
 set -uo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." || exit 1
 
-readonly CARD_LABEL="Surface Front Camera"
 readonly CAPTURE_W=1920 CAPTURE_H=1080   # must stay >= 1296 wide, see above
 readonly OUT_W=1280 OUT_H=720            # what clients see
-readonly PIDFILE="out/camera-bridge.pid"
-readonly LOGFILE="out/camera-bridge.log"
+
+# location -> card label. The label is the contract between setup (which creates
+# the devices) and this script (which finds them), and it is what users see in
+# their browser's camera menu.
+label_for() {
+	case $1 in
+	front) printf 'Surface Front Camera' ;;
+	back) printf 'Surface Back Camera' ;;
+	*) return 1 ;;
+	esac
+}
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok() { printf '\033[1;32m  ok\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m FAIL\033[0m %s\n' "$*" >&2; exit 1; }
 
-# The loopback device, identified by the card label we set when loading it.
+pidfile_for() { printf 'out/camera-bridge-%s.pid' "$1"; }
+
+# The loopback device carrying a given card label.
 loopback_device() {
-	local d name
+	local want=$1 d name
 	for d in /dev/video*; do
 		[[ -e ${d} ]] || continue
 		name="$(v4l2-ctl -d "${d}" --info 2>/dev/null | sed -n 's/^\s*Card type\s*:\s*//p')"
-		[[ ${name} == "${CARD_LABEL}" ]] && { printf '%s' "${d}"; return 0; }
+		[[ ${name} == "${want}" ]] && { printf '%s' "${d}"; return 0; }
 	done
 	return 1
 }
 
-# object.serial of the front camera's PipeWire node, so the pipeline does not
-# depend on a node id that changes between sessions.
-front_camera_serial() {
+# object.serial of a camera's PipeWire node, keyed on the physical location the
+# firmware reports, so nothing depends on ids that change between sessions.
+camera_serial() {
 	pw-dump 2>/dev/null | python3 -c '
 import json, sys
+want = sys.argv[1]
 for o in json.load(sys.stdin):
     p = (o.get("info") or {}).get("props") or {}
-    if p.get("media.class") == "Video/Source" and p.get("api.libcamera.location") == "front":
-        print(p.get("object.serial", "")); break
-'
+    if p.get("media.class") == "Video/Source" and p.get("api.libcamera.location") == want:
+        print(p.get("object.serial", ""))
+        break
+' "$1"
 }
 
-# Build the pipeline argv once, so 'start' and 'run' can never drift apart.
-build_pipeline() {
-	local serial=$1 dev=$2
-	PIPELINE=(
-		gst-launch-1.0
-		pipewiresrc target-object="${serial}" always-copy=true
-		! "video/x-raw,width=${CAPTURE_W},height=${CAPTURE_H}"
-		! videoconvert ! videoscale
-		! "video/x-raw,format=YUY2,width=${OUT_W},height=${OUT_H}"
-		! v4l2sink device="${dev}" sync=false
-	)
-}
-
-# Shared preflight for both start and run.
-resolve_targets() {
+resolve() {
+	local loc=$1
+	CARD="$(label_for "${loc}")" || die "unknown camera '${loc}' (use front or back)"
 	command -v v4l2-ctl >/dev/null || die "v4l-utils is not installed"
 	[[ -e /sys/module/v4l2loopback ]] ||
 		die "v4l2loopback is not loaded; run: sudo ./scripts/camera-bridge-setup.sh"
-	DEV="$(loopback_device)" || die "no loopback device labelled '${CARD_LABEL}'"
-	SERIAL="$(front_camera_serial)"
-	[[ -n ${SERIAL} ]] || die "front camera not found in PipeWire"
+	DEV="$(loopback_device "${CARD}")" || die "no loopback device labelled '${CARD}'"
+	SERIAL="$(camera_serial "${loc}")"
+	[[ -n ${SERIAL} ]] || die "no ${loc} camera in PipeWire"
 }
 
-case "${1:-status}" in
-run)
-	# Foreground mode for systemd: it supervises and restarts, so no pidfile.
-	resolve_targets
-	build_pipeline "${SERIAL}" "${DEV}"
-	log "feeding ${DEV} from PipeWire serial ${SERIAL} (foreground)"
-	exec "${PIPELINE[@]}"
-	;;
-start)
-	command -v v4l2-ctl >/dev/null || die "v4l-utils is not installed"
-	[[ -e /sys/module/v4l2loopback ]] ||
-		die "v4l2loopback is not loaded; run: sudo ./scripts/camera-bridge-setup.sh"
-
-	dev="$(loopback_device)" || die "no loopback device labelled '${CARD_LABEL}'"
-	serial="$(front_camera_serial)"
-	[[ -n ${serial} ]] || die "front camera not found in PipeWire"
-
-	if [[ -f ${PIDFILE} ]] && kill -0 "$(cat "${PIDFILE}")" 2>/dev/null; then
-		ok "already running (pid $(cat "${PIDFILE}"))"
-		exit 0
-	fi
-
-	log "feeding ${dev} from PipeWire serial ${serial}"
-	mkdir -p out
-	# videorate + a fixed output caps keeps the loopback format stable, which is
-	# what lets clients negotiate without ever seeing the black low-res modes.
-	nohup gst-launch-1.0 \
-		pipewiresrc target-object="${serial}" always-copy=true \
+run_pipeline() {
+	exec gst-launch-1.0 \
+		pipewiresrc target-object="${SERIAL}" always-copy=true \
 		! "video/x-raw,width=${CAPTURE_W},height=${CAPTURE_H}" \
 		! videoconvert ! videoscale \
 		! "video/x-raw,format=YUY2,width=${OUT_W},height=${OUT_H}" \
-		! v4l2sink device="${dev}" sync=false \
-		>"${LOGFILE}" 2>&1 &
-	echo $! >"${PIDFILE}"
+		! v4l2sink device="${DEV}" sync=false
+}
+
+cmd=${1:-status}
+loc=${2:-front}
+
+case ${cmd} in
+run)
+	# Foreground: systemd supervises and restarts, so no pidfile is kept.
+	resolve "${loc}"
+	log "feeding ${DEV} from ${loc} camera (serial ${SERIAL})"
+	run_pipeline
+	;;
+start)
+	resolve "${loc}"
+	pidfile="$(pidfile_for "${loc}")"
+	if [[ -f ${pidfile} ]] && kill -0 "$(cat "${pidfile}")" 2>/dev/null; then
+		ok "${loc} already running (pid $(cat "${pidfile}"))"
+		exit 0
+	fi
+	mkdir -p out
+	log "feeding ${DEV} from ${loc} camera (serial ${SERIAL})"
+	nohup "$0" run "${loc}" >"out/camera-bridge-${loc}.log" 2>&1 &
+	echo $! >"${pidfile}"
 	sleep 3
-	if kill -0 "$(cat "${PIDFILE}")" 2>/dev/null; then
-		ok "bridge running (pid $(cat "${PIDFILE}")) -> ${dev} @ ${OUT_W}x${OUT_H} YUY2"
+	if kill -0 "$(cat "${pidfile}")" 2>/dev/null; then
+		ok "${loc} bridge running -> ${DEV} @ ${OUT_W}x${OUT_H} YUY2"
 	else
-		tail -15 "${LOGFILE}" >&2
-		rm -f "${PIDFILE}"
-		die "bridge died on startup, see ${LOGFILE}"
+		tail -15 "out/camera-bridge-${loc}.log" >&2
+		rm -f "${pidfile}"
+		die "${loc} bridge died on startup"
 	fi
 	;;
 stop)
-	if [[ -f ${PIDFILE} ]]; then
-		kill "$(cat "${PIDFILE}")" 2>/dev/null && ok "stopped"
-		rm -f "${PIDFILE}"
+	pidfile="$(pidfile_for "${loc}")"
+	if [[ -f ${pidfile} ]]; then
+		kill "$(cat "${pidfile}")" 2>/dev/null && ok "${loc} stopped"
+		rm -f "${pidfile}"
 	else
-		ok "not running"
+		ok "${loc} not running"
 	fi
 	;;
 status)
-	if dev="$(loopback_device)"; then ok "loopback: ${dev}"; else echo "  no loopback device"; fi
-	if [[ -f ${PIDFILE} ]] && kill -0 "$(cat "${PIDFILE}")" 2>/dev/null; then
-		ok "bridge pid $(cat "${PIDFILE}")"
-	else
-		echo "  bridge not running"
-	fi
+	for l in front back; do
+		card="$(label_for "${l}")"
+		if dev="$(loopback_device "${card}")"; then
+			printf '  %-5s device=%s' "${l}" "${dev}"
+		else
+			printf '  %-5s device=none  ' "${l}"
+		fi
+		if systemctl --user is-active --quiet "camera-bridge@${l}" 2>/dev/null; then
+			printf '  service=active\n'
+		elif [[ -f "$(pidfile_for "${l}")" ]] && kill -0 "$(cat "$(pidfile_for "${l}")")" 2>/dev/null; then
+			printf '  manual=running\n'
+		else
+			printf '  not running\n'
+		fi
+	done
 	;;
-*) die "usage: $0 {start|stop|status}" ;;
+*) die "usage: $0 {start|run|stop|status} [front|back]" ;;
 esac

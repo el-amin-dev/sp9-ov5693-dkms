@@ -56,8 +56,17 @@ Four separate problems, each of which alone leaves you without a camera.
 **1. The driver never programs MIPI_CTRL00.** The stock `ov5693` stream-enable path
 writes only `SW_STREAM (0x0100)`. Register `0x4800` is never touched, so the IPU6
 CSI-2 receiver never locks its D-PHY and no frame ever arrives. Writing `0x2d` there
-immediately before stream-on fixes it. Root cause credit:
-[linux-surface discussion #2198](https://github.com/linux-surface/linux-surface/discussions/2198).
+immediately before stream-on fixes it.
+
+> **This part is already upstream.** The same fix is open as
+> [linux-surface#2171](https://github.com/linux-surface/linux-surface/pull/2171), and
+> the rear-camera rotation as
+> [linux-surface#2227](https://github.com/linux-surface/linux-surface/pull/2227). Root
+> cause was documented in
+> [discussion #2198](https://github.com/linux-surface/linux-surface/discussions/2198).
+> Once those land in the linux-surface kernel you will not need the DKMS module here
+> at all — but you will still need the userspace half below, which is what this
+> project mainly exists for.
 
 **2. Nothing an ordinary app can open.** The sensor reaches userspace only through
 libcamera's software ISP, which PipeWire publishes as a `Video/Source`. Browsers
@@ -88,6 +97,11 @@ Two patches on top of upstream v6.19 `drivers/media/i2c/ov5693.c`:
 
 Plus `surfacecam/`, a small Python package that republishes the libcamera stream as an
 ordinary V4L2 webcam, and the `start-camera` / `stop-camera` commands.
+
+**What is actually unique here** is problems 2–4: a working kernel driver still leaves
+you with no camera in Chrome, Firefox, Zoom or Teams, and nothing upstream addresses
+that. If you are running a kernel that already carries #2171, skip the DKMS module and
+use the bridge alone.
 
 ## Status
 

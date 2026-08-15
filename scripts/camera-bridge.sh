@@ -37,6 +37,32 @@ label_for() {
 	esac
 }
 
+# Degrees to rotate each camera, clockwise.
+#
+# Not taken from api.libcamera.rotation, which does not describe what comes out of
+# the pipeline: the front sensor reports 180 and libcamera already compensates, so
+# its frames are upright; the back sensor reports 0 yet is physically mounted
+# upside down, so nothing corrects it. These are the measured values. Override per
+# machine with FRONT_ROTATION / BACK_ROTATION if a different model differs.
+rotation_for() {
+	case $1 in
+	front) printf '%s' "${FRONT_ROTATION:-0}" ;;
+	back) printf '%s' "${BACK_ROTATION:-180}" ;;
+	*) printf '0' ;;
+	esac
+}
+
+# GStreamer videoflip method for a rotation in degrees.
+flip_method_for() {
+	case $1 in
+	0) printf 'none' ;;
+	90) printf 'clockwise' ;;
+	180) printf 'rotate-180' ;;
+	270) printf 'counterclockwise' ;;
+	*) die "unsupported rotation '$1' (use 0, 90, 180 or 270)" ;;
+	esac
+}
+
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok() { printf '\033[1;32m  ok\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m FAIL\033[0m %s\n' "$*" >&2; exit 1; }
@@ -110,15 +136,20 @@ resolve() {
 	[[ -e /sys/module/v4l2loopback ]] ||
 		die "v4l2loopback is not loaded; run: sudo ./scripts/camera-bridge-setup.sh"
 	DEV="$(loopback_device "${CARD}")" || die "no loopback device labelled '${CARD}'"
+	ROTATION="$(rotation_for "${loc}")"
+	FLIP="$(flip_method_for "${ROTATION}")"
 	wait_for_node "${loc}" ||
 		die "no ${loc} camera in PipeWire after 120s (check: cam -l, systemctl --user status wireplumber)"
 }
 
 run_pipeline() {
+	# videoflip before videoscale: at 180 the dimensions are unchanged either way,
+	# but rotating the smaller frame after scaling would cost less only for 90/270,
+	# where scaling first would also swap the output aspect.
 	exec gst-launch-1.0 \
 		pipewiresrc target-object="${SERIAL}" always-copy=true \
 		! "video/x-raw,width=${CAPTURE_W},height=${CAPTURE_H}" \
-		! videoconvert ! videoscale \
+		! videoconvert ! videoflip method="${FLIP}" ! videoscale \
 		! "video/x-raw,format=YUY2,width=${OUT_W},height=${OUT_H}" \
 		! v4l2sink device="${DEV}" sync=false
 }
@@ -130,7 +161,7 @@ case ${cmd} in
 run)
 	# Foreground: systemd supervises and restarts, so no pidfile is kept.
 	resolve "${loc}"
-	log "feeding ${DEV} from ${loc} camera (serial ${SERIAL})"
+	log "feeding ${DEV} from ${loc} camera (serial ${SERIAL}, rotate ${ROTATION}deg)"
 	run_pipeline
 	;;
 start)

@@ -133,6 +133,29 @@ After this, Chrome, Firefox, Zoom, Teams and GNOME Snapshot see two cameras,
 **Surface Front Camera** and **Surface Back Camera**. No browser flags, no
 `chrome://flags`, no portal.
 
+### Picture is upside down
+
+Each camera is rotated in the bridge, not by libcamera. The values are measured
+rather than read from `api.libcamera.rotation`, because that property does not
+describe what leaves the pipeline: the front sensor reports `180` and libcamera
+already compensates, so its frames are upright, while the back sensor reports `0`
+yet is physically mounted upside down and nothing corrects it.
+
+Defaults are front `0`, back `180`. Override per machine:
+
+```bash
+systemctl --user edit camera-bridge@back
+# [Service]
+# Environment=BACK_ROTATION=0
+systemctl --user restart camera-bridge@back
+```
+
+Accepted values are `0`, `90`, `180`, `270`. Check what is in effect with:
+
+```bash
+journalctl --user -u camera-bridge@back -n 20 | grep rotate
+```
+
 ### Cameras gone after a reboot
 
 Symptom: everything worked, you reboot, and the browser shows no camera. Check:

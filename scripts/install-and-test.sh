@@ -21,7 +21,11 @@ ROLLED_BACK=0
 # Runs on every exit; a zero status is the success path and does nothing.
 rollback() {
 	local rc=$1
-	[[ ${rc} -eq 0 || ${ROLLED_BACK} -eq 1 ]] && exit "${rc}"
+	# Explicit if, not `[[ ... ]] && exit`: the latter's non-zero status on the
+	# success path is exactly the set -e footgun this trap must not step on.
+	if [[ ${rc} -eq 0 || ${ROLLED_BACK} -eq 1 ]]; then
+		exit "${rc}"
+	fi
 	ROLLED_BACK=1
 	echo
 	warn "failed (exit ${rc}) -- rolling back to the stock module"
@@ -54,7 +58,7 @@ if [[ "$(cat /sys/module/module/parameters/sig_enforce 2>/dev/null || echo N)" =
 fi
 
 STOCK_PATH="$(module_path)"
-DMESG_MARK="$(dmesg 2>/dev/null | wc -l)"
+DMESG_MARK="$(dmesg 2>/dev/null | wc -l || echo 0)"
 ok "stock module: ${STOCK_PATH:-<none loaded>}"
 
 # --- 2. stage the source ----------------------------------------------------

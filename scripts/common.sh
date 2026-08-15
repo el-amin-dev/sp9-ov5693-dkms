@@ -63,7 +63,14 @@ sensor_i2c_bus() {
 }
 
 # Reload the sensor module, tolerating it not being loaded yet.
+# Fails loudly if a loaded module cannot be removed: modprobe would then be a
+# no-op and the old code would still be running, which every later assertion
+# based on modinfo(1) -- which reports the file on disk, not the loaded module --
+# would happily accept.
 reload_module() {
-	modprobe -r "${MODULE}" 2>/dev/null || true
+	if [[ -d "/sys/module/${MODULE}" ]]; then
+		modprobe -r "${MODULE}" ||
+			{ echo "cannot unload ${MODULE}: still in use? (close any camera app)" >&2; return 1; }
+	fi
 	modprobe "${MODULE}"
 }

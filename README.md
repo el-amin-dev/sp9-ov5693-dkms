@@ -36,9 +36,40 @@ v6.19 `drivers/media/i2c/ov5693.c`:
 ## Getting started
 
 ```bash
+./install.sh              # everything: kernel module, loopback device, bridge service
+./install.sh --check      # report state, change nothing
+./install.sh --uninstall  # undo it
+```
+
+Run it as your normal user — it calls `sudo` only for the steps that need it. Afterwards
+every app (Chrome, Firefox, Zoom, Teams, GNOME Snapshot) sees one camera named
+**Surface Front Camera**, with no browser flags to set.
+
+Just the kernel module, without the userspace plumbing:
+
+```bash
 sudo ./scripts/install-and-test.sh   # build, install, load, verify — rolls back on failure
 sudo ./scripts/uninstall.sh          # back to the stock in-tree module
 ```
+
+## Why the kernel fix alone is not enough
+
+Patching the driver makes the sensor produce frames, but nothing else can use them:
+
+- the sensor is only reachable through libcamera's **software ISP**, published by
+  PipeWire — browsers enumerate `/dev/video*` instead and find only the ~30 IPU6 ISYS
+  nodes, which advertise **zero pixel formats**. Chrome reports `NotFoundError`;
+  Firefox lists dozens of blank `ipu6` entries.
+- Chrome *can* use PipeWire cameras via `chrome://flags/#enable-webrtc-pipewire-camera`,
+  and then finds the camera — but on GNOME the xdg portal refuses every request:
+  `Only the focused app is allowed to show a system access dialog`. Chrome asks from a
+  **windowless utility process**, so the permission dialog can never be shown.
+- below roughly **1296px wide** this sensor's software ISP returns all-zero (black)
+  buffers, and browsers default to 640x480.
+
+So `install.sh` republishes the working stream through `v4l2loopback` as an ordinary
+webcam, captured at 1920x1080 and offered as a single 1280x720 YUY2 mode. Full
+reasoning and measurements are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for setup, run, and test commands.
 

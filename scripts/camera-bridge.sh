@@ -80,17 +80,43 @@ loopback_device() {
 	return 1
 }
 
-# object.serial of a camera's PipeWire node, keyed on the physical location the
-# firmware reports, so nothing depends on ids that change between sessions.
+# object.serial of a camera's PipeWire node.
+#
+# Matched primarily on the ACPI path, not api.libcamera.location: that property is
+# not reliably populated -- after one reboot the front reported "front" while the
+# back reported nothing at all, so a location-only match silently lost the back
+# camera and the bridge declared it missing for 120s. The path comes from firmware
+# and has been stable across every boot: ...CAMF is the front, ...CAMR the rear.
 camera_serial() {
 	pw-dump 2>/dev/null | python3 -c '
 import json, sys
+
 want = sys.argv[1]
-for o in json.load(sys.stdin):
-    p = (o.get("info") or {}).get("props") or {}
-    if p.get("media.class") == "Video/Source" and p.get("api.libcamera.location") == want:
-        print(p.get("object.serial", ""))
-        break
+# Most specific signal first; each is checked against every node before falling
+# back, so a weaker signal never wins while a stronger one is available.
+suffix = {"front": "CAMF", "back": "CAMR"}.get(want, "")
+model = {"front": "ov5693", "back": "ov13858"}.get(want, "")
+
+nodes = [
+    (o.get("info") or {}).get("props") or {}
+    for o in json.load(sys.stdin)
+]
+nodes = [p for p in nodes
+         if p.get("media.class") == "Video/Source" and p.get("device.api") == "libcamera"]
+
+def pick(match):
+    for p in nodes:
+        if match(p):
+            return p.get("object.serial", "")
+    return ""
+
+serial = (
+    pick(lambda p: str(p.get("api.libcamera.path", "")).endswith(suffix))
+    or pick(lambda p: p.get("api.libcamera.location") == want)
+    or pick(lambda p: p.get("device.product.name") == model)
+)
+if serial:
+    print(serial)
 ' "$1"
 }
 

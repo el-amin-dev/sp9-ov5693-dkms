@@ -73,6 +73,7 @@ Packages, via apt (the installer aborts if apt would *remove* anything):
 | `v4l-utils` | `v4l2-ctl`, to find and inspect the devices |
 | `pipewire-bin` | `pw-dump`, to locate the camera nodes |
 | `libcamera-tools` | `cam`, used by the test scripts |
+| `python3` | the `surfacecam` package — the bridge itself, and the camera facts `install.sh` reads back from it |
 
 Outside the repo it creates only these, all removed by `./uninstall.sh`:
 
@@ -113,7 +114,69 @@ So `install.sh` republishes the working stream through `v4l2loopback` as an ordi
 webcam, captured at 1920x1080 and offered as a single 1280x720 YUY2 mode. Full
 reasoning and measurements are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
-See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for setup, run, and test commands.
+## The bridge
+
+The republishing is done by `surfacecam/`, a Python package that needs nothing beyond
+the standard library and the PyGObject GStreamer bindings (`python3-gi`,
+`gir1.2-gstreamer-1.0` — already present on an Ubuntu desktop). One user service per
+camera runs `python3 -m surfacecam.cli run <front|back>`.
+
+| Module | Responsibility |
+|---|---|
+| `surfacecam/config.py` | single source of truth: the camera list, card labels, `/dev/video` numbers, capture and output resolutions, thresholds |
+| `surfacecam/pipewire.py` | finds a camera's PipeWire node — pure functions over `pw-dump` JSON |
+| `surfacecam/loopback.py` | the loopback device: state and format from sysfs, consumers from `fuser` |
+| `surfacecam/pipeline.py` | builds the GStreamer pipeline and moves it between states |
+| `surfacecam/supervisor.py` | the on-demand policy — decides when the sensor may run |
+| `surfacecam/cli.py` | entry point: `run <front\|back>` and `status` |
+
+`config.py` is also a CLI, so the shell scripts ask it rather than keeping a second
+copy of the same facts:
+
+```bash
+python3 -m surfacecam.config keys              # front back
+python3 -m surfacecam.config labels            # the card names apps display
+python3 -m surfacecam.config devices           # /dev/video42, /dev/video43
+python3 -m surfacecam.config services          # camera-bridge@front camera-bridge@back
+python3 -m surfacecam.config modprobe-options  # the v4l2loopback arguments
+```
+
+### The camera runs only while something is watching
+
+The bridge previously streamed continuously, which left the privacy LED lit and the
+sensor powered whether or not anyone was using the camera — a security problem before
+it is a battery one: a light that is always on tells you nothing.
+
+The pipeline now stays attached to the loopback but is parked in `PAUSED` whenever no
+process has the device open. `v4l2sink` keeps the device claimed with its format set,
+so every app still lists a working camera, while `pipewiresrc` stops pulling — the
+sensor powers down and the LED goes out. It resumes within about a second of an app
+opening the device (the supervisor polls twice a second), and keeps streaming for ~5s
+after the last consumer leaves, because apps routinely close and immediately reopen
+the device while negotiating and tearing the sensor down in that gap makes the stream
+flap.
+
+Stopping the producer outright would be simpler, and does not work: v4l2loopback 0.15.3
+has no `keep_format` parameter, so a device with no producer reverts to
+`state=output` with no format, and apps then either skip it or show a blank picture.
+[`docs/RUNBOOK.md`](docs/RUNBOOK.md) has the commands to verify the behaviour on your
+own machine.
+
+## Tests
+
+Unit tests, standard library only — no pytest, no camera, no root:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+26 tests over camera identification against a recorded `pw-dump` (including a
+regression test for the back camera vanishing when libcamera reported no
+`api.libcamera.location`), the on-demand policy, and the pipeline description.
+
+The hardware tests — capture, rollback, and the browser probe — need the camera and,
+for `dmesg`, root. See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for those and for the rest
+of the setup, run, and debug commands.
 
 ## Documentation
 

@@ -25,8 +25,6 @@ set -uo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")" || exit 1
 
 readonly USER_UNIT="${HOME}/.config/systemd/user/camera-bridge@.service"
-# One bridge instance per physical camera.
-readonly CAMERAS=(front back)
 
 # Everything the pipeline needs, by the command it provides:
 #   dkms/build-essential/headers -> building both out-of-tree modules
@@ -34,11 +32,17 @@ readonly CAMERAS=(front back)
 #   v4l-utils                    -> v4l2-ctl, used to find and inspect the devices
 #   pipewire-bin                 -> pw-dump, used to locate the camera nodes
 #   libcamera-tools              -> cam, used by the test scripts
+#   python3-gi, gir1.2-gstreamer -> the GObject bindings surfacecam.pipeline
+#                                   imports; present by default on an Ubuntu
+#                                   desktop, absent on a minimal install
+#   python3                      -> surfacecam/, which the bridge and this script
+#                                   both read their camera facts from
 readonly DEPS=(
-	dkms build-essential
+	dkms build-essential python3
 	gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 	gstreamer1.0-pipewire
 	v4l-utils pipewire-bin libcamera-tools
+	python3-gi gir1.2-gstreamer-1.0
 	v4l2loopback-dkms v4l2loopback-utils
 )
 
@@ -56,6 +60,26 @@ need_sudo() {
 	log "sudo password needed for: $*"
 	sudo -v || die "sudo required"
 }
+
+# Ask surfacecam/config.py, which is the single source of truth for what cameras
+# exist and what they are called. Keeping a second copy here is exactly how the
+# installer and the bridge used to end up disagreeing.
+config_get() {
+	local out
+	out="$(python3 -m surfacecam.config "$1")" ||
+		die "python3 -m surfacecam.config $1 failed; python3 must be installed and the repo intact"
+	[[ -n ${out} ]] || die "surfacecam.config $1 returned nothing"
+	printf '%s\n' "${out}"
+}
+
+# One bridge instance per physical camera; CAMERAS[i] is published as LABELS[i].
+read -r -a CAMERAS <<<"$(config_get keys)"
+mapfile -t LABELS < <(config_get labels)
+readonly CAMERAS LABELS
+# A die() inside a subshell above only kills that subshell, so verify here too:
+# continuing with an empty camera list would silently install nothing.
+[[ ${#CAMERAS[@]} -gt 0 && ${#CAMERAS[@]} -eq ${#LABELS[@]} ]] ||
+	die "surfacecam.config gave ${#CAMERAS[@]} camera(s) and ${#LABELS[@]} label(s); cannot continue"
 
 # Install packages, but never at the cost of removing any. On this distro pulling
 # the wrong package can take the desktop with it, so a non-empty removal list is
@@ -87,7 +111,7 @@ device_for() {
 }
 
 check() {
-	local cam want dev
+	local i cam want dev
 	log "State"
 	if modinfo -F filename ov5693 2>/dev/null | grep -q updates/dkms; then
 		ok "patched ov5693 active"
@@ -98,8 +122,9 @@ check() {
 	fi
 	if [[ -e /sys/module/v4l2loopback ]]; then ok "v4l2loopback loaded"; else warn "v4l2loopback not loaded"; fi
 
-	for cam in "${CAMERAS[@]}"; do
-		want="Surface ${cam^} Camera"
+	for i in "${!CAMERAS[@]}"; do
+		cam="${CAMERAS[i]}"
+		want="${LABELS[i]}"
 		if dev="$(device_for "${want}")"; then ok "${want}: ${dev}"; else warn "no '${want}' device"; fi
 		if systemctl --user is-active --quiet "camera-bridge@${cam}"; then
 			ok "  bridge@${cam} active"
@@ -145,8 +170,8 @@ fi
 # --- 2. the loopback devices -------------------------------------------------
 log "Step 2/3: v4l2loopback devices"
 have=0
-for cam in "${CAMERAS[@]}"; do
-	device_for "Surface ${cam^} Camera" >/dev/null && have=$((have + 1))
+for label in "${LABELS[@]}"; do
+	device_for "${label}" >/dev/null && have=$((have + 1))
 done
 if [[ ${have} -eq ${#CAMERAS[@]} ]]; then
 	ok "loopback devices already present"
@@ -194,6 +219,7 @@ done
 
 check
 echo
-ok "Done. Apps now show 'Surface Front Camera' and 'Surface Back Camera'."
+shown="$(printf ", '%s'" "${LABELS[@]}")"
+ok "Done. Apps now show ${shown:2}."
 echo "     Try it:   https://webcamtests.com"
 echo "     Undo:     ./uninstall.sh"

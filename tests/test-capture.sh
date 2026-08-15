@@ -8,7 +8,8 @@
 #   1. cam exits 0 within the timeout (it must not hang), and
 #   2. no new "stream (stop|close) time out" line appears in dmesg.
 #
-# Frame content is asserted only at >= 1296 px wide. libcamera's software ISP
+# Frame content is asserted only at or above surfacecam.config.SOFTISP_MIN_WIDTH
+# -- the same threshold the bridge is built around. libcamera's software ISP
 # returns empty buffers for narrower streams, so an all-zero 1280x720 capture is
 # a known libcamera limitation, not a driver regression -- it is measured and
 # reported, never failed on.
@@ -38,8 +39,14 @@ RESOLUTIONS="${RESOLUTIONS:-1920x1080 2592x1944}"
 FRAMES="${FRAMES:-5}"
 CAPTURE_TIMEOUT="${CAPTURE_TIMEOUT:-30}"
 OUTDIR="${OUTDIR:-$(mktemp -d /tmp/ov5693-capture.XXXXXX)}"
-# Below this width libcamera's soft ISP hands back empty buffers.
-readonly SOFTISP_MIN_WIDTH=1296
+# Below this width libcamera's soft ISP hands back empty buffers. Read from
+# surfacecam/config.py rather than repeated here, so the threshold the test
+# judges by cannot drift away from the one the bridge is built around.
+SOFTISP_MIN_WIDTH="$(cd "${REPO_ROOT}" && python3 -c 'from surfacecam import config; print(config.SOFTISP_MIN_WIDTH)')" ||
+	die "cannot read SOFTISP_MIN_WIDTH from surfacecam.config; is python3 installed?"
+[[ ${SOFTISP_MIN_WIDTH} =~ ^[0-9]+$ ]] ||
+	die "surfacecam.config gave a non-numeric SOFTISP_MIN_WIDTH: '${SOFTISP_MIN_WIDTH}'"
+readonly SOFTISP_MIN_WIDTH
 
 failures=0
 passes=0

@@ -95,11 +95,33 @@ timeout 30 cam -c 1 -C5 -s width=1920,height=1080 --file=/tmp/frame-#.raw
 sudo dmesg | grep -E 'stream (stop|close) time out'   # expect no output
 ```
 
+### Unit tests (no camera, no root, no pytest)
+
+The bridge's logic lives in `surfacecam/` and is tested with the standard library
+only. This is the suite to run on every change; it takes milliseconds.
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py'   # expect: Ran 26 tests ... OK
+python3 -m unittest tests.test_pipewire -v             # one module, verbose
+```
+
+`tests/test_pipewire.py` runs camera identification against a recorded `pw-dump`
+in `tests/fixtures/`, including the regression where libcamera reported no
+`api.libcamera.location` for the rear sensor and the back camera disappeared.
+`tests/test_policy.py` covers the on-demand policy, the rotation-to-`videoflip`
+mapping, and the pipeline description.
+
 ## Making the camera usable in browsers and apps
 
 The kernel fix alone does not give you a webcam. The sensor reaches userspace only
 through libcamera's software ISP, which PipeWire publishes as a `Video/Source`.
 Ordinary apps do not see that, so a bridge republishes it as a normal V4L2 device.
+
+The bridge is the `surfacecam/` Python package: `config.py` (all camera facts),
+`pipewire.py` (node discovery), `loopback.py` (device state and consumers),
+`pipeline.py` (GStreamer), `supervisor.py` (when the sensor may run), `cli.py`
+(entry point). One systemd user instance per camera runs
+`python3 -m surfacecam.cli run <front|back>`.
 
 ```bash
 ./install.sh          # does all of it: packages, module, devices, services
@@ -112,7 +134,7 @@ Manually, if you prefer the steps:
 ```bash
 sudo apt-get install -y v4l2loopback-dkms v4l2loopback-utils v4l-utils \
     gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-    gstreamer1.0-pipewire pipewire-bin libcamera-tools
+    gstreamer1.0-pipewire pipewire-bin libcamera-tools python3
 sudo ./scripts/camera-bridge-setup.sh --persist   # /dev/video42 + /dev/video43
 
 mkdir -p ~/.config/systemd/user
@@ -121,17 +143,94 @@ systemctl --user daemon-reload
 systemctl --user enable --now camera-bridge@front camera-bridge@back
 ```
 
+The unit sets `WorkingDirectory` to the repo and runs
+`/usr/bin/python3 -m surfacecam.cli run %i`, so the clone must stay where it was
+when `install.sh` ran. If you move it, re-run `./install.sh` to rewrite the unit.
+
 Check it:
 
 ```bash
-./scripts/camera-bridge.sh status
+python3 -m surfacecam.cli status                 # both cameras, one line each
 systemctl --user status camera-bridge@front
 v4l2-ctl -d /dev/video42 --list-formats-ext      # expect one: YUYV 1280x720 @30fps
+```
+
+`status` prints, per camera, the loopback it found, that device's kernel `state`
+and `format`, the PipeWire node serial, and `watchers` — every process holding the
+device open. That count includes the bridge's own producer, so a healthy idle
+camera reads `watchers=1`, and each app using it adds one. It exits non-zero if a
+device or node is missing, or if a loopback is not `state=capture` with a format.
+
+> `./scripts/camera-bridge.sh` is retired — the bridge is `surfacecam/` now, and the
+> service no longer runs the script. Use `python3 -m surfacecam.cli status` in place
+> of its `status`. It survives in the tree only so `./uninstall.sh` can still stop a
+> feeder someone started with it by hand.
+
+Where the facts come from, if you need them in a shell of your own:
+
+```bash
+python3 -m surfacecam.config keys              # front back
+python3 -m surfacecam.config labels            # card names, one per line
+python3 -m surfacecam.config devices           # /dev/videoN, one per line
+python3 -m surfacecam.config services          # camera-bridge@front camera-bridge@back
+python3 -m surfacecam.config modprobe-options  # the v4l2loopback argument string
 ```
 
 After this, Chrome, Firefox, Zoom, Teams and GNOME Snapshot see two cameras,
 **Surface Front Camera** and **Surface Back Camera**. No browser flags, no
 `chrome://flags`, no portal.
+
+### The camera only streams while an app has the device open
+
+The pipeline is parked in `PAUSED` when nothing is watching: `v4l2sink` keeps the
+loopback claimed with its format set, so apps still list a usable camera, while
+`pipewiresrc` stops pulling — the sensor powers down and the privacy LED goes out.
+Opening the device resumes it within about a second (the supervisor polls every
+0.5s), and it keeps streaming for 5s after the last consumer leaves so apps that
+close and reopen while negotiating do not make the stream flap.
+
+Verify it. With nothing using the camera, the camera node is `suspended` while the
+loopback stays `capture` with a format:
+
+```bash
+# camera node state
+pw-dump | python3 -c 'import json,sys
+for o in json.load(sys.stdin):
+    i = o.get("info") or {}; p = i.get("props") or {}
+    if p.get("device.api") == "libcamera" and p.get("media.class") == "Video/Source":
+        print(p.get("api.libcamera.path"), i.get("state"))'
+
+# the loopback must NOT follow it down
+cat /sys/class/video4linux/video42/state    # expect: capture
+cat /sys/class/video4linux/video42/format   # expect a format, not empty
+```
+
+Now open the camera in a browser or with `gst-launch-1.0`, and re-run the same two
+checks: the node flips to `running` (LED on) while the loopback is unchanged. Close
+the consumer, wait ~6s, and the node returns to `suspended`.
+
+```bash
+gst-launch-1.0 v4l2src device=/dev/video42 ! videoconvert ! autovideosink   # a consumer
+python3 -m surfacecam.cli status   # watchers=2 while it runs, back to 1 after
+journalctl --user -u camera-bridge@front -f
+```
+
+The journal is the quickest read: the supervisor logs every transition with the
+reason that caused it.
+
+```
+INFO bridging front -> /dev/video42 (node 540, rotate 0 deg)
+INFO camera off (startup: nothing watching yet)
+INFO camera on (1 consumer(s))
+INFO camera off (no consumers)
+```
+
+If the loopback ever reads `state=output` with an empty format, the producer has
+detached — that is the failure the `PAUSED` design exists to avoid. v4l2loopback
+0.15.3 has no `keep_format` parameter (`modinfo v4l2loopback | grep parm` confirms
+it), so the device cannot hold a format on its own; apps then either skip it or
+show a blank picture. Do not "simplify" the bridge by stopping the pipeline when
+the camera is idle.
 
 ### Picture is upside down
 
@@ -141,19 +240,21 @@ describe what leaves the pipeline: the front sensor reports `180` and libcamera
 already compensates, so its frames are upright, while the back sensor reports `0`
 yet is physically mounted upside down and nothing corrects it.
 
-Defaults are front `0`, back `180`. Override per machine:
+Defaults are front `0`, back `180`, set as the `rotation` field on each `Camera` in
+`surfacecam/config.py`. Accepted values are `0`, `90`, `180`, `270`; anything else
+is rejected with a `ValueError` rather than silently ignored. To change one, edit
+that field and restart the instance:
 
 ```bash
-systemctl --user edit camera-bridge@back
-# [Service]
-# Environment=BACK_ROTATION=0
 systemctl --user restart camera-bridge@back
 ```
 
-Accepted values are `0`, `90`, `180`, `270`. Check what is in effect with:
+Check what is in effect:
 
 ```bash
 journalctl --user -u camera-bridge@back -n 20 | grep rotate
+python3 -c 'from surfacecam import config, pipeline
+c = config.by_key("back"); print(c.rotation, pipeline.flip_method(c.rotation))'
 ```
 
 ### Cameras gone after a reboot
@@ -170,8 +271,8 @@ Cause: WirePlumber enumerates libcamera **once**, at startup. At boot it can run
 before the IPU6 and sensor drivers are ready, find no cameras, and never look again,
 so the PipeWire nodes never appear. The bridge then has nothing to read from.
 
-The bridge handles this itself now: it waits up to 120s for its node, and if
-libcamera can see the camera while PipeWire cannot, it restarts WirePlumber once.
+The bridge handles this itself now: it polls `pw-dump` for up to 120s waiting for
+its node, and restarts WirePlumber once along the way to force a re-enumeration.
 The unit also sets `Restart=always` with `StartLimitIntervalSec=0`, because the
 default start limit put it permanently in `failed` after a few quick retries -- which
 is what left the camera dead until the service was restarted by hand.
@@ -197,8 +298,9 @@ ERROR: pipeline doesn't want to preroll.
 
 Only the reloaded sensor is affected, which is why the back camera keeps working
 while the front does not. `install.sh` refreshes WirePlumber after the module step,
-and the bridge treats a pipeline that dies within 15s as the same symptom and
-re-enumerates once by itself. To force it:
+and the bridge treats a pipeline that dies within 15s of starting as the same
+symptom: it restarts WirePlumber and exits non-zero, letting `Restart=always` bring
+it back 5s later against freshly enumerated nodes. To force it:
 
 ```bash
 systemctl --user restart wireplumber
@@ -213,11 +315,12 @@ else grabbed the device first -- usually a browser tab left open, or an orphaned
 `gst-launch` from a previous run:
 
 ```bash
-for p in /proc/[0-9]*; do ls -l $p/fd 2>/dev/null | grep -q video42 && \
-  echo "$p $(cat $p/comm)"; done
+fuser -v /dev/video42       # what the bridge itself polls; ~30ms
 ```
 
-Close the consumer, then `systemctl --user restart camera-bridge@front`.
+Expect the bridge's own `python3` in that list -- it holds the device open on
+purpose. Close any *other* consumer, then
+`systemctl --user restart camera-bridge@front`.
 
 ### Why a loopback rather than the PipeWire path
 
@@ -274,7 +377,7 @@ sudo ./scripts/camera-bridge-setup.sh --undo      # unload module, remove /etc f
 sudo apt-get remove v4l2loopback-dkms v4l2loopback-utils   # optional
 ```
 
-Files created outside this repo: `~/.config/systemd/user/camera-bridge.service`,
+Files created outside this repo: `~/.config/systemd/user/camera-bridge@.service`,
 `/etc/modprobe.d/v4l2loopback-surface.conf`, `/etc/modules-load.d/v4l2loopback-surface.conf`.
 
 ### Testing the browser end
@@ -310,6 +413,8 @@ UPSTREAM_TAG=v6.20 ./scripts/fetch-upstream.sh --rebase   # move to a newer kern
 ```bash
 shellcheck -S warning scripts/*.sh tests/*.sh
 bash -n scripts/*.sh tests/*.sh
+python3 -m compileall -q surfacecam tests
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 ## Smoke checks

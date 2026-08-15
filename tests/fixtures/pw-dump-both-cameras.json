@@ -1,0 +1,53 @@
+[
+ {
+  "id": 107,
+  "info": {
+   "state": "running",
+   "props": {
+    "media.class": "Video/Source",
+    "device.api": "libcamera",
+    "object.serial": 540,
+    "api.libcamera.path": "\\_SB_.PC00.I2C3.CAMF",
+    "api.libcamera.location": "front",
+    "api.libcamera.rotation": 180,
+    "device.product.name": "ov5693",
+    "node.description": "Built-in Front Camera",
+    "node.name": "libcamera_input.__SB_.PC00.I2C3.CAMF"
+   }
+  }
+ },
+ {
+  "id": 99,
+  "info": {
+   "state": "running",
+   "props": {
+    "media.class": "Video/Source",
+    "device.api": "libcamera",
+    "object.serial": 542,
+    "api.libcamera.path": "\\_SB_.PC00.I2C2.CAMR",
+    "api.libcamera.location": null,
+    "api.libcamera.rotation": 0,
+    "device.product.name": "ov13858",
+    "node.description": "ov13858",
+    "node.name": "libcamera_input.__SB_.PC00.I2C2.CAMR"
+   }
+  }
+ },
+ {
+  "id": 97,
+  "info": {
+   "state": "suspended",
+   "props": {
+    "media.class": "Video/Source",
+    "device.api": "v4l2",
+    "object.serial": 544,
+    "api.libcamera.path": null,
+    "api.libcamera.location": null,
+    "api.libcamera.rotation": null,
+    "device.product.name": null,
+    "node.description": "Surface Back Camera (V4L2)",
+    "node.name": "v4l2_input._sys_devices_virtual_video4linux_video43"
+   }
+  }
+ }
+]

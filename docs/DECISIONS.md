@@ -16,6 +16,91 @@ Entry format (use exactly this shape):
 
 <!-- append ADRs below, newest first -->
 
+## ADR-005 — Stream on demand by parking the pipeline in PAUSED (2026-08-15)
+- status: accepted
+- context: the bridge held the sensor open for as long as the service ran, so the
+  camera streamed 24/7 whether or not anything was watching. The privacy LED was
+  therefore lit permanently — a security problem before it is a battery one, because
+  an indicator that is always on carries no information: the user cannot tell an app
+  using the camera from the bridge idling. The obvious fix — stop the pipeline while
+  nobody is watching — does not work here. v4l2loopback 0.15.3 exposes no
+  `keep_format` parameter (`modinfo v4l2loopback` lists `devices`, `video_nr`,
+  `card_label`, `exclusive_caps`, `max_*` and nothing else), so a loopback with no
+  producer reverts to `state=output` with an empty format, and apps then either skip
+  the device or show a blank picture. Verified on this machine.
+- decision: the pipeline stays attached to the loopback for the life of the service
+  and is moved between `PLAYING` and `PAUSED` instead of being torn down. `v4l2sink`
+  keeps the device claimed with its format set, so it stays `state=capture` and every
+  app keeps listing it, while `pipewiresrc` stops pulling and the sensor powers down —
+  the PipeWire camera node drops to `suspended` and the LED goes out. The supervisor
+  polls `fuser` on the device every 0.5s; any consumer resumes streaming, and the last
+  consumer leaving starts a 5s linger before pausing again. The decision itself is a
+  pure function, `decide(consumers, mode, idle_for)`, tested independently of the loop
+  that feeds it. Measured first with `tests/pause-probe.py` — a throwaway probe that
+  asked only "does PAUSED actually stop the sensor while the loopback keeps its
+  format?" — before any of this was built on the assumption.
+- alternatives: stopping the pipeline when idle — rejected, the loopback loses its
+  format and the camera stops being listed, which is worse than an LED that is always
+  on; unloading and reloading v4l2loopback per session — rejected, it drops any live
+  client and needs root at exactly the wrong moment; leaving it streaming and
+  documenting the LED — rejected, that is the security problem, not a workaround for
+  it; no linger at all — rejected, apps routinely close and immediately reopen the
+  device while negotiating, and pausing in that gap makes the stream visibly flap.
+- consequences: the camera is on only while something is watching, and the LED becomes
+  a truthful indicator. The costs are a ~0.5s poll (about 30ms of `fuser` each time,
+  which is why sysfs and `fuser` replaced `v4l2-ctl` and a `/proc/*/fd` walk), up to
+  about a second of latency on the first frame after an app opens the device, and up
+  to 5s of streaming after the last one leaves. `surfacecam.cli status` counts the
+  bridge's own producer among a device's `watchers`, so an idle camera reads
+  `watchers=1` rather than 0. If a future v4l2loopback gains `keep_format`, the
+  simpler "stop the producer" design becomes available and this ADR should be
+  revisited.
+
+## ADR-004 — Move the bridge into a Python package with a single source of truth (2026-08-15)
+- status: accepted
+- context: the bridge was a bash script that built its GStreamer pipeline inside a
+  heredoc, and the facts about the cameras were copied by hand across the scripts that
+  needed them — card labels in four files, the camera list in three, the `/dev/video`
+  numbers in two. Neither half could be tested without the hardware: the only way to
+  observe a policy decision was to watch an LED. Five bugs reached the user as a
+  result — the bridge not surviving a reboot, the back camera upside down, a reboot
+  guard that broke the back camera outright, stale camera nodes left by a module
+  reload, and the back camera vanishing because it was matched on
+  `api.libcamera.location`, which libcamera left empty for that sensor. Every one of
+  them is a few lines of recorded JSON or a two-line assertion once the logic is
+  callable without a camera.
+- decision: `surfacecam/`, a Python package split so that each decision is reachable
+  from a test — `config.py` (every camera fact, and the only place any of them is
+  written down), `pipewire.py` (pure functions over parsed `pw-dump` output),
+  `loopback.py` (device state from sysfs, consumers from `fuser`), `pipeline.py`
+  (builds a pipeline description as a string, moves states), `supervisor.py` (the
+  on-demand policy), `cli.py` (argument parsing only). `config.py` doubles as a CLI —
+  `python3 -m surfacecam.config {keys,labels,devices,services,modprobe-options}` — so
+  the shell scripts that remain read the same facts instead of keeping a copy. The
+  systemd unit runs `python3 -m surfacecam.cli run %i` with `WorkingDirectory` set to
+  the repo. Tests are stdlib `unittest` only, run with
+  `python3 -m unittest discover -s tests -p 'test_*.py'`: 26 of them, no pytest, no
+  hardware, milliseconds.
+- alternatives: keeping bash and adding a bats suite — rejected, the parts that
+  actually broke are JSON matching and a state machine, which bash can only express as
+  string surgery over `jq` output; a Python package with a `pyproject.toml` and
+  dependencies — rejected, this is a system-level tool that must run before anything
+  is set up, so the standard library plus the PyGObject GStreamer bindings
+  (`python3-gi` and `gir1.2-gstreamer-1.0`, already present on an Ubuntu desktop) is
+  the whole dependency budget; a single
+  `bridge.py` — rejected, the point is that policy is separable from I/O, and one file
+  invites putting the `pw-dump` call back inside the matching code.
+- consequences: `python3` joins the package dependency list, and the shell scripts now
+  fail loudly if `surfacecam.config` cannot be imported rather than proceeding on a
+  stale copy of the camera list. `scripts/camera-bridge.sh` is superseded and being
+  retired — nothing runs it any more except `uninstall.sh`, best-effort, to stop a
+  feeder someone started by hand — and `python3 -m surfacecam.cli status` replaces its
+  `status`. GStreamer is
+  imported lazily inside `Pipeline`, so the package stays importable — and testable —
+  on a machine with no GObject bindings; the price is that a missing `python3-gi`
+  surfaces when the bridge starts rather than at import, on a distro where the desktop
+  does not already carry it.
+
 ## ADR-003 — Ship the register value as a module parameter, not a constant (2026-08-15)
 - status: accepted
 - context: the fix is `MIPI_CTRL00 (0x4800) = 0x2d`, but that value is documented in

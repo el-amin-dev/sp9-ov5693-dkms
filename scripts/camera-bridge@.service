@@ -21,7 +21,8 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=%REPO%/scripts/camera-bridge.sh run %i
+WorkingDirectory=%REPO%
+ExecStart=/usr/bin/python3 -m surfacecam.cli run %i
 Restart=always
 RestartSec=5
 

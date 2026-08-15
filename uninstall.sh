@@ -11,13 +11,20 @@ set -uo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")" || exit 1
 
 readonly USER_UNIT="${HOME}/.config/systemd/user/camera-bridge@.service"
-readonly CAMERAS=(front back)
 readonly PKGS=(v4l2loopback-dkms v4l2loopback-utils)
 
 log() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 ok() { printf '\033[1;32m  ok\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m  !!\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m FAIL\033[0m %s\n' "$*" >&2; exit 1; }
+
+# surfacecam/config.py is the single source of truth for which cameras exist.
+# An empty list here would silently skip every teardown step below and report
+# success, so it is a hard failure.
+keys="$(python3 -m surfacecam.config keys)" && [[ -n ${keys} ]] ||
+	die "cannot read the camera list from surfacecam.config"
+read -r -a CAMERAS <<<"${keys}"
+readonly CAMERAS
 
 [[ ${EUID} -ne 0 ]] || die "run as your normal user, not root (it calls sudo itself)"
 
@@ -38,10 +45,6 @@ need_sudo() {
 log "Stopping the bridge services"
 for cam in "${CAMERAS[@]}"; do
 	systemctl --user disable --now "camera-bridge@${cam}" 2>/dev/null || true
-done
-# Also catch anything started by hand with camera-bridge.sh start.
-for cam in "${CAMERAS[@]}"; do
-	./scripts/camera-bridge.sh stop "${cam}" >/dev/null 2>&1 || true
 done
 rm -f "${USER_UNIT}" \
 	"${HOME}/.config/systemd/user/camera-bridge.service" \

@@ -1,39 +1,101 @@
-# sp9-ov5693-dkms
+# Surface Pro 9 camera fix for Linux (OV5693 + Intel IPU6)
 
-> Patched OV5693 camera sensor driver, packaged for DKMS — fixes the front camera on
-> Microsoft Surface devices that pair an OV5693 with an Intel IPU6.
+**Working front and rear cameras on a Surface Pro 9 under Linux — in Chrome, Firefox,
+Zoom, Teams, Google Meet and GNOME Snapshot.** Patched `ov5693` sensor driver packaged
+for DKMS, plus the userspace bridge that makes the cameras actually usable by ordinary
+apps.
 
-## The problem
+Developed on a Surface Pro 9 running Ubuntu 26.04 with the
+[linux-surface](https://github.com/linux-surface/linux-surface) kernel. Nothing here is
+model-specific: it applies to any Surface pairing an OmniVision OV5693 with an Intel
+IPU6.
 
-The sensor probes and binds, `cam -l` lists the camera, and then every capture hangs
-forever with:
+## Do these symptoms match?
+
+**The camera hangs and never returns a frame.** `cam -l` lists the camera, the sensor
+binds, and then any capture blocks forever while `dmesg` fills with:
 
 ```
 intel_ipu6_isys.isys intel_ipu6.isys.40: stream stop time out
 intel_ipu6_isys.isys intel_ipu6.isys.40: stream close time out
 ```
 
-The stock driver's stream-enable path writes only `SW_STREAM (0x0100)`; it never
-programs `MIPI_CTRL00 (0x4800)`. The IPU6 CSI-2 receiver never locks its D-PHY, so no
-frame ever arrives.
+**Browsers cannot find a camera at all.** Chrome reports
+`NotFoundError: Requested device not found`. Firefox shows a long list of identical
+blank **`ipu6`** entries, none of which produce a picture.
+
+**Chrome finds it, then refuses.** With
+`chrome://flags/#enable-webrtc-pipewire-camera` enabled you get
+`Camera access denied by the XDG portal`, and the journal shows
+`Only the focused app is allowed to show a system access dialog`.
+
+**The picture is black,** even though the capture "succeeds".
+
+**The rear camera is upside down.**
+
+All five are fixed here. If you only have the first one, the kernel patch alone is
+enough; the rest need the bridge too.
+
+## Quick start
+
+```bash
+mkdir -p ~/projects && cd ~/projects
+git clone https://github.com/el-amin-dev/sp9-ov5693-dkms
+cd sp9-ov5693-dkms
+./install.sh
+start-camera
+```
+
+Then open <https://webcamtests.com>. Run it as your normal user — it calls `sudo`
+itself only where root is needed.
+
+## What was actually wrong
+
+Four separate problems, each of which alone leaves you without a camera.
+
+**1. The driver never programs MIPI_CTRL00.** The stock `ov5693` stream-enable path
+writes only `SW_STREAM (0x0100)`. Register `0x4800` is never touched, so the IPU6
+CSI-2 receiver never locks its D-PHY and no frame ever arrives. Writing `0x2d` there
+immediately before stream-on fixes it. Root cause credit:
+[linux-surface discussion #2198](https://github.com/linux-surface/linux-surface/discussions/2198).
+
+**2. Nothing an ordinary app can open.** The sensor reaches userspace only through
+libcamera's software ISP, which PipeWire publishes as a `Video/Source`. Browsers
+enumerate `/dev/video*` instead and find only the ~30 IPU6 ISYS nodes, which advertise
+**zero pixel formats** — hence Chrome's `NotFoundError` and Firefox's wall of blank
+`ipu6` entries.
+
+**3. The PipeWire route is blocked on GNOME.** Chrome *can* use PipeWire cameras
+behind a flag, and then it finds the camera — but every access goes through the xdg
+camera portal, which refuses: Chrome asks from a **windowless utility process**, and
+GNOME only shows that permission dialog for a focused window. Clicking, focusing and
+native Wayland all fail. So this project sidesteps the portal entirely with
+`v4l2loopback`, which also fixes Firefox, Zoom and Teams for free.
+
+**4. Below ~1296px wide the sensor returns black.** At 1280x720 it is worse than
+black: the IPU6 receiver logs `stream stop time out` and stays wedged. Browsers default
+to 640x480. The bridge therefore always captures 1920x1080 and offers a single fixed
+1280x720 mode, so nothing can negotiate its way into a broken one.
 
 ## The fix
 
-Write `MIPI_CTRL00 = 0x2d` immediately before stream-on. Two patches on top of upstream
-v6.19 `drivers/media/i2c/ov5693.c`:
+Two patches on top of upstream v6.19 `drivers/media/i2c/ov5693.c`:
 
 | Patch | What |
 |---|---|
 | `patches/0001-add-OVTI5693-acpi-hid.patch` | the `OVTI5693` ACPI HID Surface firmware uses (carried from linux-surface, so the DKMS module binds like the stock one) |
 | `patches/0002-write-mipi-ctrl00-on-stream-enable.patch` | the `0x4800` write, exposed as the `mipi_ctrl00` module parameter |
 
+Plus `surfacecam/`, a small Python package that republishes the libcamera stream as an
+ordinary V4L2 webcam, and the `start-camera` / `stop-camera` commands.
+
 ## Status
 
-- created: 2026-08-15
-- developed and verified on: Surface Pro 9, Ubuntu 26.04, kernel 6.19.8-surface-3
-- applies to: any Surface with an OV5693 + IPU6; nothing here is model-specific
+- verified on: Surface Pro 9, Ubuntu 26.04, kernel 6.19.8-surface-3
+- front and rear cameras both working, surviving reboots
+- 39 unit tests, no hardware and no pytest required
 
-## Getting started
+## Installing in detail
 
 ```bash
 mkdir -p ~/projects && cd ~/projects

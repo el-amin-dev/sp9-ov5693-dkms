@@ -112,6 +112,38 @@ in `tests/fixtures/`, including the regression where libcamera reported no
 description, and the on-demand policy — which is tested but disabled in the shipped
 default, see below.
 
+## Related: the microphone records only clipped noise
+
+Not a camera problem, but the same machine and the same afternoon, so it is written
+down here rather than lost.
+
+Symptom: the mic appears to work -- PipeWire lists it, recordings are not silent --
+but everything captured is unusable. Measured, both channels were pinned to the rails,
+left at `+32767` and right at `-32768`, with exactly **one distinct sample value**
+across thousands of frames.
+
+Cause: Ubuntu had the ALC274 capture path at 60 dB of gain, `Capture 100% [30.00dB]`
+plus `Mic Boost 100% [30.00dB]`, which slams the ADC into saturation.
+
+```bash
+amixer -c 0 sget 'Mic Boost'   # 30.00dB here is the problem
+amixer -c 0 sget Capture
+
+amixer -c 0 sset 'Mic Boost' 0        # the boost is what clips it
+amixer -c 0 sset Capture 50%
+sudo alsactl store                    # survive a reboot via alsa-restore.service
+```
+
+After that, a quiet room measured ~1.5% FS with 7835 distinct values, and an acoustic
+loopback -- playing a 440 Hz tone and analysing what the mic recorded -- returned the
+tone at 15.8x the level of control frequencies, confirming speaker and mic together.
+
+Raise **Capture**, never Mic Boost, if you need more level.
+
+Beware when diagnosing this: a stereo WAV is interleaved, so analysing the samples as
+one stream makes the left/right alternation look like a zero-crossing on every sample,
+i.e. like healthy audio. De-interleave the channels first.
+
 ## Turning the cameras on and off
 
 ```bash

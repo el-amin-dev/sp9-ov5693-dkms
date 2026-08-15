@@ -30,6 +30,17 @@ The stock in-tree `ov5693.ko` is never modified or deleted. DKMS installs to
 `/lib/modules/<kver>/updates/dkms/`, which `modprobe` searches before
 `kernel/drivers/`, so uninstalling is only ever "stop shadowing it".
 
+What the install touches outside this repo: `/usr/src/ov5693-surface-1.0.0`,
+DKMS's own state under `/var/lib/dkms`, and
+`/lib/modules/<kver>/updates/dkms` + `modules.dep` (unavoidable for any DKMS
+package). Nothing in `/boot`, no bootloader config, no package manager, no reboot.
+
+On Ubuntu, DKMS also generates a MOK signing keypair under
+`/var/lib/shim-signed/mok/` if one does not exist yet, and signs the module with
+it. That is stock DKMS behaviour: the key is **not** enrolled (enrolling needs
+`mokutil --import` plus a reboot), and with Secure Boot off the signature is
+simply ignored.
+
 ## Run
 
 Nothing to run — this is a kernel module. It loads on boot once installed, and DKMS

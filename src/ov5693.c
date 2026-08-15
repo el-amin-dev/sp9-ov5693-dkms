@@ -15,8 +15,10 @@
  * Intel IPU6 (sp9-ov5693-dkms). Developed and verified on the Surface Pro 9;
  * nothing below is SP9-specific, so it applies to any such Surface.
  *
- * Base: drivers/media/i2c/ov5693.c from Linux v6.19,
- *       sha256 e4d5f9c4c148f1664bb1d4ae37c1095d9de42109907db71439f2f26f6519ea1c
+ * Base: upstream drivers/media/i2c/ov5693.c. The exact tag and sha256 are
+ *       recorded in patches/upstream.pin and checked by scripts/fetch-upstream.sh
+ *       -- deliberately not repeated here, so a rebase cannot leave this comment
+ *       asserting a provenance the file no longer has.
  *
  * Deltas versus that base (both kept as readable patches under patches/):
  *   0001 - add the "OVTI5693" ACPI HID (carried from linux-surface
@@ -147,9 +149,37 @@
 #define OV5693_PIXEL_RATE			167680000
 
 static int mipi_ctrl00 = OV5693_MIPI_CTRL00_IPU6;
-module_param(mipi_ctrl00, int, 0644);
+
+/*
+ * Validate on set rather than on use: MIPI_CTRL00 is an 8-bit register, so
+ * cci_write() would silently truncate anything wider. Since this knob exists to
+ * be swept by hand, a value that reads back from sysfs but never reached the
+ * hardware would make a sweep quietly retest something already tried.
+ */
+static int ov5693_set_mipi_ctrl00(const char *val, const struct kernel_param *kp)
+{
+	int value, ret;
+
+	ret = kstrtoint(val, 0, &value);
+	if (ret)
+		return ret;
+
+	if (value < OV5693_MIPI_CTRL00_SKIP || value > 0xff)
+		return -ERANGE;
+
+	*(int *)kp->arg = value;
+
+	return 0;
+}
+
+static const struct kernel_param_ops ov5693_mipi_ctrl00_ops = {
+	.set = ov5693_set_mipi_ctrl00,
+	.get = param_get_int,
+};
+
+module_param_cb(mipi_ctrl00, &ov5693_mipi_ctrl00_ops, &mipi_ctrl00, 0644);
 MODULE_PARM_DESC(mipi_ctrl00,
-		 "Value written to MIPI_CTRL00 (0x4800) on stream enable, -1 to skip the write");
+		 "Value written to MIPI_CTRL00 (0x4800) on stream enable, 0-255, -1 to skip the write");
 
 #define to_ov5693_sensor(x) container_of(x, struct ov5693_device, sd)
 

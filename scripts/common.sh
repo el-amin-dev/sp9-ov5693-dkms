@@ -40,6 +40,38 @@ module_path() { modinfo -F filename "${MODULE}" 2>/dev/null || true; }
 # True when the DKMS-built module (in updates/dkms) is the one in effect.
 module_is_patched() { [[ "$(module_path)" == *"/updates/dkms/"* ]]; }
 
+# --- kernel log cursor ------------------------------------------------------
+# A line count is not a usable cursor into a ring buffer: once it wraps, dmesg
+# still returns about as many lines while the old ones have been evicted, so
+# "everything after line N" silently becomes empty exactly when the driver is
+# logging hardest. Use the monotonic timestamp of the last line instead.
+
+# Timestamp (seconds, float) of the newest kernel log line; "0" if unreadable.
+dmesg_mark() {
+	local last
+	last="$(dmesg 2>/dev/null | tail -1)"
+	[[ ${last} =~ ^\[[[:space:]]*([0-9]+\.[0-9]+)\] ]] &&
+		{ printf '%s' "${BASH_REMATCH[1]}"; return 0; }
+	printf '0'
+}
+
+# Kernel log lines newer than mark $1, optionally filtered by regex $2.
+dmesg_since() {
+	local mark=$1 pattern=${2:-.}
+	dmesg 2>/dev/null |
+		awk -v mark="${mark}" '
+			match($0, /^\[[ ]*[0-9]+\.[0-9]+\]/) {
+				ts = substr($0, RSTART + 1, RLENGTH - 2) + 0
+				if (ts > mark)
+					print
+			}' |
+		grep -E "${pattern}" || true
+}
+
+# The failure signature this project exists to remove.
+# shellcheck disable=SC2034  # consumed by tests/test-capture.sh
+readonly STREAM_TIMEOUT_RE='stream (stop|close) time out'
+
 # i2c devices currently bound to the sensor driver, one per line
 # (e.g. "i2c-OVTI5693:00"). Empty output means nothing is bound.
 bound_devices() {

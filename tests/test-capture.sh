@@ -43,11 +43,14 @@ detect_camera() {
 		return 0
 	fi
 
-	local count idx
-	count="$(cam -l 2>/dev/null | grep -cE '^[0-9]+:' || true)"
-	[[ ${count} -gt 0 ]] || return 1
+	# Parse the indices libcamera actually reports rather than assuming they run
+	# 1..N contiguously.
+	local idx
+	local -a indices=()
+	mapfile -t indices < <(cam -l 2>/dev/null | sed -n 's/^\([0-9]\+\):.*/\1/p')
+	[[ ${#indices[@]} -gt 0 ]] || return 1
 
-	for ((idx = 1; idx <= count; idx++)); do
+	for idx in "${indices[@]}"; do
 		if cam -c "${idx}" -I 2>/dev/null | grep -qi 'ov5693'; then
 			printf '%s' "${idx}"
 			return 0
@@ -73,14 +76,6 @@ detect_camera() {
 }
 
 # --- helpers ----------------------------------------------------------------
-dmesg_lines() { dmesg 2>/dev/null | wc -l; }
-
-# New "stream ... time out" lines logged since line number $1.
-dmesg_timeouts_since() {
-	dmesg 2>/dev/null | tail -n "+$(($1 + 1))" |
-		grep -E 'stream (stop|close) time out' || true
-}
-
 # Ratio of non-zero bytes, as a percentage with two decimals.
 nonzero_pct() {
 	local f=$1 total nonzero
@@ -101,8 +96,12 @@ run_resolution() {
 	mkdir -p "${dir}"
 	log "Capturing ${FRAMES} frames at ${res}"
 
-	before=$(dmesg_lines)
-	timeout "${CAPTURE_TIMEOUT}" cam -c "${cam_id}" -C"${FRAMES}" \
+	before=$(dmesg_mark)
+	# -k: the hang this test detects may well ignore SIGTERM, so escalate to
+	# SIGKILL. --foreground: without it timeout waits on a process group that a
+	# stuck cam can keep alive, and the "timeout" would itself never return.
+	timeout -k 5 --foreground "${CAPTURE_TIMEOUT}" \
+		cam -c "${cam_id}" -C"${FRAMES}" \
 		-s "width=${width},height=${height}" \
 		--file="${dir}/frame-#.raw" >"${logf}" 2>&1
 	rc=$?
@@ -117,7 +116,8 @@ run_resolution() {
 		[[ ${actual} == "${res}" ]] || warn "requested ${res}, libcamera configured ${actual}"
 	fi
 
-	if [[ ${rc} -eq 124 ]]; then
+	# 124 = terminated by timeout; 137 = it took the SIGKILL from -k.
+	if [[ ${rc} -eq 124 || ${rc} -eq 137 ]]; then
 		RESULTS+=("FAIL ${res}: cam still running after ${CAPTURE_TIMEOUT}s (the stream hang is not fixed)")
 		((failures++))
 		return 1
@@ -127,7 +127,7 @@ run_resolution() {
 		return 1
 	fi
 
-	timeouts="$(dmesg_timeouts_since "${before}")"
+	timeouts="$(dmesg_since "${before}" "${STREAM_TIMEOUT_RE}")"
 	if [[ -n ${timeouts} ]]; then
 		RESULTS+=("FAIL ${res}: kernel logged $(wc -l <<<"${timeouts}") stream timeout line(s)")
 		((failures++))

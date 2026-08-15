@@ -25,7 +25,7 @@ Ref: https://github.com/linux-surface/linux-surface/discussions/2198
 
 --- a/drivers/media/i2c/ov5693.c
 +++ b/drivers/media/i2c/ov5693.c
-@@ -10,6 +10,20 @@
+@@ -10,6 +10,22 @@
   * Tsuchiya Yuto
   * Jordan Hand
   * Jake Day
@@ -34,8 +34,10 @@ Ref: https://github.com/linux-surface/linux-surface/discussions/2198
 + * Intel IPU6 (sp9-ov5693-dkms). Developed and verified on the Surface Pro 9;
 + * nothing below is SP9-specific, so it applies to any such Surface.
 + *
-+ * Base: drivers/media/i2c/ov5693.c from Linux v6.19,
-+ *       sha256 e4d5f9c4c148f1664bb1d4ae37c1095d9de42109907db71439f2f26f6519ea1c
++ * Base: upstream drivers/media/i2c/ov5693.c. The exact tag and sha256 are
++ *       recorded in patches/upstream.pin and checked by scripts/fetch-upstream.sh
++ *       -- deliberately not repeated here, so a rebase cannot leave this comment
++ *       asserting a provenance the file no longer has.
 + *
 + * Deltas versus that base (both kept as readable patches under patches/):
 + *   0001 - add the "OVTI5693" ACPI HID (carried from linux-surface
@@ -46,7 +48,7 @@ Ref: https://github.com/linux-surface/linux-surface/discussions/2198
   */
  
  #include <linux/acpi.h>
-@@ -35,6 +49,16 @@
+@@ -35,6 +51,16 @@
  #define OV5693_STOP_STREAMING			0x00
  #define OV5693_SW_RESET				0x01
  
@@ -63,19 +65,47 @@ Ref: https://github.com/linux-surface/linux-surface/discussions/2198
  #define OV5693_REG_CHIP_ID			CCI_REG16(0x300a)
  /* Yes, this is right. The datasheet for the OV5693 gives its ID as 0x5690 */
  #define OV5693_CHIP_ID				0x5690
-@@ -122,6 +146,11 @@
+@@ -122,6 +148,39 @@
  #define OV5693_LINK_FREQ_419_2MHZ		419200000
  #define OV5693_PIXEL_RATE			167680000
  
 +static int mipi_ctrl00 = OV5693_MIPI_CTRL00_IPU6;
-+module_param(mipi_ctrl00, int, 0644);
++
++/*
++ * Validate on set rather than on use: MIPI_CTRL00 is an 8-bit register, so
++ * cci_write() would silently truncate anything wider. Since this knob exists to
++ * be swept by hand, a value that reads back from sysfs but never reached the
++ * hardware would make a sweep quietly retest something already tried.
++ */
++static int ov5693_set_mipi_ctrl00(const char *val, const struct kernel_param *kp)
++{
++	int value, ret;
++
++	ret = kstrtoint(val, 0, &value);
++	if (ret)
++		return ret;
++
++	if (value < OV5693_MIPI_CTRL00_SKIP || value > 0xff)
++		return -ERANGE;
++
++	*(int *)kp->arg = value;
++
++	return 0;
++}
++
++static const struct kernel_param_ops ov5693_mipi_ctrl00_ops = {
++	.set = ov5693_set_mipi_ctrl00,
++	.get = param_get_int,
++};
++
++module_param_cb(mipi_ctrl00, &ov5693_mipi_ctrl00_ops, &mipi_ctrl00, 0644);
 +MODULE_PARM_DESC(mipi_ctrl00,
-+		 "Value written to MIPI_CTRL00 (0x4800) on stream enable, -1 to skip the write");
++		 "Value written to MIPI_CTRL00 (0x4800) on stream enable, 0-255, -1 to skip the write");
 +
  #define to_ov5693_sensor(x) container_of(x, struct ov5693_device, sd)
  
  static const char * const ov5693_supply_names[] = {
-@@ -611,6 +640,15 @@
+@@ -611,6 +670,15 @@
  {
  	int ret = 0;
  
@@ -91,7 +121,7 @@ Ref: https://github.com/linux-surface/linux-surface/discussions/2198
  	cci_write(ov5693->regmap, OV5693_SW_STREAM_REG,
  		  enable ? OV5693_START_STREAMING : OV5693_STOP_STREAMING,
  		  &ret);
-@@ -1419,5 +1457,6 @@
+@@ -1419,5 +1487,6 @@
  };
  module_i2c_driver(ov5693_driver);
  

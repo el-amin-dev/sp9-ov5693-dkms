@@ -1,0 +1,6 @@
+# Upstream base for src/ov5693.c. Single source of truth: read by
+# scripts/fetch-upstream.sh and rewritten by its --rebase mode, so the pin can
+# never drift from what src/ actually contains. Do not duplicate these values
+# anywhere else (least of all in a code comment).
+UPSTREAM_TAG=v6.19
+UPSTREAM_SHA256=e4d5f9c4c148f1664bb1d4ae37c1095d9de42109907db71439f2f26f6519ea1c

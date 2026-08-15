@@ -19,11 +19,24 @@ warn() { printf '\033[1;33m  !!\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m FAIL\033[0m %s\n' "$*" >&2; exit 1; }
 
 # surfacecam/config.py is the single source of truth for which cameras exist.
-# An empty list here would silently skip every teardown step below and report
-# success, so it is a hard failure.
-keys="$(python3 -m surfacecam.config keys)" && [[ -n ${keys} ]] ||
-	die "cannot read the camera list from surfacecam.config"
-read -r -a CAMERAS <<<"${keys}"
+#
+# But teardown must never be blocked by the thing it is tearing down: a broken
+# python3, or a repo someone has already half-deleted, is exactly when a user
+# reaches for the uninstaller. So fall back to the units actually present on the
+# system, and only give up if that finds nothing either.
+if keys="$(python3 -m surfacecam.config keys 2>/dev/null)" && [[ -n ${keys} ]]; then
+	read -r -a CAMERAS <<<"${keys}"
+else
+	warn "cannot read surfacecam.config; falling back to the installed units"
+	# Enabled instances exist as symlinks in the wants directory; the unit-file
+	# listing only shows the template itself, which names no instance.
+	mapfile -t CAMERAS < <(
+		find "${HOME}/.config/systemd/user" -name 'camera-bridge@*.service' 2>/dev/null |
+			sed -n 's/.*camera-bridge@\([^.]*\)\.service$/\1/p' |
+			grep -v '^$' | sort -u
+	)
+	[[ ${#CAMERAS[@]} -gt 0 ]] || CAMERAS=(front back)
+fi
 readonly CAMERAS
 
 [[ ${EUID} -ne 0 ]] || die "run as your normal user, not root (it calls sudo itself)"

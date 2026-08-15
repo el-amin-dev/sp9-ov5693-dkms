@@ -80,6 +80,24 @@ class TestFindNode(unittest.TestCase):
         assert find_node([], BACK) is None
         assert find_node([node(path="/other", model="something-else")], BACK) is None
 
+    def test_prefers_the_newest_node_when_a_reload_leaves_two(self):
+        """A module reload can leave a dead node advertised beside the live one.
+
+        Both carry the same ACPI path, so identity alone cannot separate them;
+        binding to the stale one fails with EINVAL. PipeWire serials increase, so
+        the higher one is the survivor.
+        """
+        nodes = [
+            node(serial="100", path="\\_SB_.PC00.I2C2.CAMR", model="ov13858"),
+            node(serial="542", path="\\_SB_.PC00.I2C2.CAMR", model="ov13858"),
+        ]
+        assert find_node(nodes, BACK).serial == "542"
+        assert find_node(list(reversed(nodes)), BACK).serial == "542", "order must not matter"
+
+    def test_survives_a_non_numeric_serial(self):
+        nodes = [node(serial="odd", path="\\_SB_.PC00.I2C2.CAMR")]
+        assert find_node(nodes, BACK) is not None
+
     def test_does_not_confuse_the_two_cameras(self):
         nodes = parse_nodes(load("pw-dump-both-cameras.json"))
         assert find_node(nodes, FRONT).serial != find_node(nodes, BACK).serial

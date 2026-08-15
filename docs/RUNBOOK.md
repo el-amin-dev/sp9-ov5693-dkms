@@ -101,15 +101,16 @@ The bridge's logic lives in `surfacecam/` and is tested with the standard librar
 only. This is the suite to run on every change; it takes milliseconds.
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_*.py'   # expect: Ran 26 tests ... OK
+python3 -m unittest discover -s tests -p 'test_*.py'   # expect: Ran 39 tests ... OK
 python3 -m unittest tests.test_pipewire -v             # one module, verbose
 ```
 
 `tests/test_pipewire.py` runs camera identification against a recorded `pw-dump`
 in `tests/fixtures/`, including the regression where libcamera reported no
 `api.libcamera.location` for the rear sensor and the back camera disappeared.
-`tests/test_policy.py` covers the on-demand policy, the rotation-to-`videoflip`
-mapping, and the pipeline description.
+`tests/test_policy.py` covers the rotation-to-`videoflip` mapping, the pipeline
+description, and the on-demand policy — which is tested but disabled in the shipped
+default, see below.
 
 ## Making the camera usable in browsers and apps
 
@@ -161,10 +162,10 @@ device open. That count includes the bridge's own producer, so a healthy idle
 camera reads `watchers=1`, and each app using it adds one. It exits non-zero if a
 device or node is missing, or if a loopback is not `state=capture` with a format.
 
-> `./scripts/camera-bridge.sh` is retired — the bridge is `surfacecam/` now, and the
-> service no longer runs the script. Use `python3 -m surfacecam.cli status` in place
-> of its `status`. It survives in the tree only so `./uninstall.sh` can still stop a
-> feeder someone started with it by hand.
+> `./scripts/camera-bridge.sh` is gone — the bridge is `surfacecam/` now. If you have
+> an older clone or notes referring to it, use `python3 -m surfacecam.cli status` in
+> place of its `status` and `python3 -m surfacecam.cli run <front|back>` in place of
+> its feeder.
 
 Where the facts come from, if you need them in a shell of your own:
 
@@ -180,43 +181,64 @@ After this, Chrome, Firefox, Zoom, Teams and GNOME Snapshot see two cameras,
 **Surface Front Camera** and **Surface Back Camera**. No browser flags, no
 `chrome://flags`, no portal.
 
-### The camera only streams while an app has the device open
+### The camera streams continuously, and the privacy LED stays on
 
-The pipeline is parked in `PAUSED` when nothing is watching: `v4l2sink` keeps the
-loopback claimed with its format set, so apps still list a usable camera, while
-`pipewiresrc` stops pulling — the sensor powers down and the privacy LED goes out.
-Opening the device resumes it within about a second (the supervisor polls every
-0.5s), and it keeps streaming for 5s after the last consumer leaves so apps that
-close and reopen while negotiating do not make the stream flap.
-
-Verify it. With nothing using the camera, the camera node is `suspended` while the
-loopback stays `capture` with a format:
+As shipped, the bridge streams for as long as the service runs, so the camera node
+stays `running` and the privacy LED stays lit even with no app using the camera.
+That is the default and it is expected — do not chase it as a fault.
 
 ```bash
-# camera node state
+# camera node state: "running" with the service up, whether or not anyone is watching
 pw-dump | python3 -c 'import json,sys
 for o in json.load(sys.stdin):
     i = o.get("info") or {}; p = i.get("props") or {}
     if p.get("device.api") == "libcamera" and p.get("media.class") == "Video/Source":
         print(p.get("api.libcamera.path"), i.get("state"))'
 
-# the loopback must NOT follow it down
 cat /sys/class/video4linux/video42/state    # expect: capture
 cat /sys/class/video4linux/video42/format   # expect a format, not empty
 ```
 
-Now open the camera in a browser or with `gst-launch-1.0`, and re-run the same two
-checks: the node flips to `running` (LED on) while the loopback is unchanged. Close
-the consumer, wait ~6s, and the node returns to `suspended`.
+The journal states it plainly at startup:
+
+```
+INFO bridging front -> /dev/video42 (node 540, rotate 0 deg)
+INFO streaming continuously (on-demand disabled)
+```
+
+To turn the LED off, stop the service: `systemctl --user stop camera-bridge@front`.
+
+#### On-demand streaming, and why it is off
+
+`surfacecam/supervisor.py` implements an on-demand policy — park the pipeline in
+`PAUSED` while no process has the loopback open, so `pipewiresrc` stops pulling and
+the sensor powers down, while `v4l2sink` keeps the device claimed with its format set
+so apps still list a usable camera. It is disabled by `ON_DEMAND = False` in
+`surfacecam/config.py`.
+
+It is off because enabling it breaks capture. The policy side works: the supervisor
+notices a consumer within about a second and returns the pipeline to `PLAYING`, and
+the journal logs the transition. The consumer then receives nothing — a 40s `ffmpeg`
+capture against the loopback produced zero images and no error message. `v4l2sink`
+and `v4l2loopback` do not appear to resume cleanly from `PAUSED` once a consumer has
+already opened the device. A truthful LED is not worth a camera that returns no
+frames, so it ships off.
+
+**Not the default.** Everything below describes what you would see *if* you set
+`ON_DEMAND = True` and restarted the bridge — including the frame starvation. With
+the shipped default the node stays `running` and none of these transitions happen.
+
+With `ON_DEMAND = True` and nothing using the camera, the node reads `suspended`
+while the loopback stays `capture` with a format. Opening the device with a consumer
+flips the node to `running` (LED on) with the loopback unchanged; closing it and
+waiting ~6s (a 5s linger, so apps that close and reopen while negotiating do not make
+the stream flap) returns the node to `suspended`.
 
 ```bash
 gst-launch-1.0 v4l2src device=/dev/video42 ! videoconvert ! autovideosink   # a consumer
 python3 -m surfacecam.cli status   # watchers=2 while it runs, back to 1 after
 journalctl --user -u camera-bridge@front -f
 ```
-
-The journal is the quickest read: the supervisor logs every transition with the
-reason that caused it.
 
 ```
 INFO bridging front -> /dev/video42 (node 540, rotate 0 deg)
@@ -225,12 +247,17 @@ INFO camera on (1 consumer(s))
 INFO camera off (no consumers)
 ```
 
+Those log lines are the trap: `camera on (1 consumer(s))` appears exactly as it
+should, and the consumer still gets no frames. Judge it by whether frames arrive,
+not by the journal.
+
 If the loopback ever reads `state=output` with an empty format, the producer has
-detached — that is the failure the `PAUSED` design exists to avoid. v4l2loopback
-0.15.3 has no `keep_format` parameter (`modinfo v4l2loopback | grep parm` confirms
-it), so the device cannot hold a format on its own; apps then either skip it or
-show a blank picture. Do not "simplify" the bridge by stopping the pipeline when
-the camera is idle.
+detached. That is why stopping the pipeline when idle is not the simpler fix it looks
+like: v4l2loopback 0.15.3 has no `keep_format` parameter (`modinfo v4l2loopback |
+grep parm` lists only `debug`, `max_buffers`, `max_openers`, `devices`, `video_nr`,
+`card_label`, `exclusive_caps`, `max_width`, `max_height`), so the device cannot hold
+a format on its own and apps stop listing it. Ubuntu resolute/universe ships no newer
+version, so there is nothing to upgrade to.
 
 ### Picture is upside down
 

@@ -31,6 +31,8 @@ readonly USER_UNIT="${HOME}/.config/systemd/user/camera-bridge@.service"
 #   gstreamer1.0-*               -> pipewiresrc, videoconvert/videoscale, v4l2sink
 #   v4l-utils                    -> v4l2-ctl, used to find and inspect the devices
 #   pipewire-bin                 -> pw-dump, used to locate the camera nodes
+#   psmisc                       -> fuser, how the bridge sees who has a
+#                                   camera open
 #   libcamera-tools              -> cam, used by the test scripts
 #   python3-gi, gir1.2-gstreamer -> the GObject bindings surfacecam.pipeline
 #                                   imports; present by default on an Ubuntu
@@ -41,7 +43,7 @@ readonly DEPS=(
 	dkms build-essential python3
 	gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 	gstreamer1.0-pipewire
-	v4l-utils pipewire-bin libcamera-tools
+	v4l-utils pipewire-bin libcamera-tools psmisc
 	python3-gi gir1.2-gstreamer-1.0
 	v4l2loopback-dkms v4l2loopback-utils
 )
@@ -73,13 +75,21 @@ config_get() {
 }
 
 # One bridge instance per physical camera; CAMERAS[i] is published as LABELS[i].
-read -r -a CAMERAS <<<"$(config_get keys)"
-mapfile -t LABELS < <(config_get labels)
-readonly CAMERAS LABELS
-# A die() inside a subshell above only kills that subshell, so verify here too:
-# continuing with an empty camera list would silently install nothing.
-[[ ${#CAMERAS[@]} -gt 0 && ${#CAMERAS[@]} -eq ${#LABELS[@]} ]] ||
-	die "surfacecam.config gave ${#CAMERAS[@]} camera(s) and ${#LABELS[@]} label(s); cannot continue"
+#
+# Loaded on demand rather than at startup, because reading it needs python3 and
+# python3 is one of the packages Step 0 installs. Doing this at the top meant a
+# minimal system died on "python3 must be installed" before it could install it.
+CAMERAS=()
+LABELS=()
+load_camera_config() {
+	[[ ${#CAMERAS[@]} -gt 0 ]] && return 0
+	read -r -a CAMERAS <<<"$(config_get keys)"
+	mapfile -t LABELS < <(config_get labels)
+	# A die() inside a subshell above only kills that subshell, so verify here
+	# too: continuing with an empty camera list would silently install nothing.
+	[[ ${#CAMERAS[@]} -gt 0 && ${#CAMERAS[@]} -eq ${#LABELS[@]} ]] ||
+		die "surfacecam.config gave ${#CAMERAS[@]} camera(s) and ${#LABELS[@]} label(s); cannot continue"
+}
 
 # Install packages, but never at the cost of removing any. On this distro pulling
 # the wrong package can take the desktop with it, so a non-empty removal list is
@@ -122,6 +132,14 @@ check() {
 	fi
 	if [[ -e /sys/module/v4l2loopback ]]; then ok "v4l2loopback loaded"; else warn "v4l2loopback not loaded"; fi
 
+	# --check is a diagnostic and must stay useful on a half-installed system, so
+	# a missing python3 downgrades the report rather than aborting it.
+	if ! python3 -m surfacecam.config keys >/dev/null 2>&1; then
+		warn "cannot read surfacecam.config (is python3 installed?); skipping per-camera state"
+		return 1
+	fi
+	load_camera_config
+
 	for i in "${!CAMERAS[@]}"; do
 		cam="${CAMERAS[i]}"
 		want="${LABELS[i]}"
@@ -149,6 +167,10 @@ apt_install "linux-headers-$(uname -r)"
 [[ -d "/lib/modules/$(uname -r)/build" ]] ||
 	die "no kernel headers for $(uname -r) even after install; is this a custom kernel?"
 ok "kernel headers present for $(uname -r)"
+
+# Safe now: python3 is installed.
+load_camera_config
+ok "cameras: ${CAMERAS[*]}"
 
 # --- 1. the kernel module ----------------------------------------------------
 log "Step 1/3: patched ov5693 kernel module"

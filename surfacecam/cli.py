@@ -13,6 +13,7 @@ import subprocess
 import sys
 
 from . import config, loopback, pipewire
+from .nudge import Nudger
 from .supervisor import Supervisor
 
 
@@ -34,7 +35,9 @@ def restart_wireplumber() -> None:
 
 def cmd_run(args) -> int:
     camera = config.by_key(args.camera)
-    return Supervisor(camera=camera, on_stale_node=restart_wireplumber).run()
+    # The Nudger's lock and timestamp are shared by both camera instances, so
+    # only one of them can restart WirePlumber and only occasionally.
+    return Supervisor(camera=camera, _nudger=Nudger(action=restart_wireplumber)).run()
 
 
 def cmd_status(_args) -> int:

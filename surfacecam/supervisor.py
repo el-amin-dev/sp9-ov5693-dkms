@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from . import config, loopback, pipewire
+from .nudge import Nudger
 from .config import Camera
 from .pipeline import Pipeline, describe
 
@@ -37,9 +38,14 @@ LINGER_SECONDS = 5.0
 # bounds how long an app waits for its first frame.
 POLL_SECONDS = 0.5
 
-# A pipeline that dies this fast was never viable -- almost always a stale
-# camera node left behind by a module reload.
+# A pipeline that dies this fast was never viable -- almost always a stale camera
+# node left behind by a module reload, which fails a few seconds in rather than
+# instantly, so this is a window to watch and not a single check.
 EARLY_DEATH_SECONDS = 15.0
+
+# Grace before concluding a missing node means WirePlumber is stale rather than
+# the camera stack still coming up. At boot everything is slow.
+NODE_GRACE_SECONDS = 15.0
 
 
 class Mode(Enum):
@@ -73,15 +79,16 @@ class Supervisor:
     """Runs one camera's bridge for as long as the service lives."""
 
     camera: Camera
-    on_stale_node: object = None
-    """Called when the pipeline dies immediately, to re-enumerate PipeWire.
+    _nudger: Nudger | None = None
+    """Rate-limited WirePlumber restart.
 
     Injected rather than called directly so the recovery path is testable without
-    restarting the user's audio stack.
+    tearing down the developer's audio, and shared across both camera instances
+    through a lock so they cannot restart it on top of each other.
     """
 
     _mode: Mode = Mode.IDLE
-    _idle_since: float = field(default_factory=time.monotonic)
+    _last_consumer_at: float = field(default_factory=time.monotonic)
 
     def run(self) -> int:
         device = loopback.find_device(self.camera)
@@ -97,19 +104,20 @@ class Supervisor:
             return 1
 
         pipeline = Pipeline(describe(self.camera, node.serial, device))
-        started = time.monotonic()
         pipeline.start()
 
         # A node can exist and still be dead: reloading the sensor module leaves
         # WirePlumber advertising nodes whose cameras are gone, and the first
-        # format request on one fails with EINVAL. Nothing about the node itself
-        # reveals this, so an immediate death is the signal.
-        error = pipeline.failed()
-        if error and time.monotonic() - started < EARLY_DEATH_SECONDS:
-            log.warning("pipeline failed immediately (%s); camera node looks stale", error)
+        # format request on one fails with EINVAL a second or two in. So watch
+        # the whole early window rather than checking once and moving on -- the
+        # single check this replaced could only ever catch a failure that had
+        # already happened before start() returned.
+        error = pipeline.wait_for_end(EARLY_DEATH_SECONDS)
+        if error:
+            log.warning("pipeline died within %.0fs (%s); camera node looks stale",
+                        EARLY_DEATH_SECONDS, error)
             pipeline.stop()
-            if callable(self.on_stale_node):
-                self.on_stale_node()
+            self._nudge("pipeline failed straight after starting")
             return 1
 
         log.info(
@@ -122,40 +130,35 @@ class Supervisor:
             # default: pausing while idle currently starves consumers entirely.
             log.info("streaming continuously (on-demand disabled)")
             try:
-                self._await_failure(pipeline)
+                error = pipeline.wait_for_end(timeout=float("inf"))
             finally:
                 pipeline.stop()
-            return 0
+            log.error("pipeline ended: %s", error)
+            return 1  # non-zero so Restart=always actually means something
 
         self._enter(Mode.IDLE, pipeline, "startup: nothing watching yet")
         try:
-            self._loop(pipeline, device)
+            return self._loop(pipeline, device)
         finally:
             pipeline.stop()
-        return 0
 
-    def _await_failure(self, pipeline: Pipeline) -> None:
-        """Block until the pipeline posts an error, so systemd can restart us."""
-        while True:
-            error = pipeline.failed()
-            if error:
-                log.error("pipeline error: %s", error)
-                return
-            time.sleep(2)
-
-    def _loop(self, pipeline: Pipeline, device: str) -> None:
+    def _loop(self, pipeline: Pipeline, device: str) -> int:
         own = frozenset({os.getpid()})
         while True:
             watchers = loopback.consumers(device, ignore_pids=own)
-            idle_for = time.monotonic() - self._idle_since
+            # Measured from when the last consumer left, not from when we last
+            # paused: the linger exists to cover an app closing and immediately
+            # reopening, and timing it from the pause made it always expired.
+            if watchers:
+                self._last_consumer_at = time.monotonic()
+            idle_for = time.monotonic() - self._last_consumer_at
             decision = decide(consumers=len(watchers), mode=self._mode, idle_for=idle_for)
             self._enter(decision.mode, pipeline, decision.reason)
 
-            error = pipeline.failed()
+            error = pipeline.wait_for_end(POLL_SECONDS)
             if error:
-                log.error("pipeline error: %s", error)
-                return
-            time.sleep(POLL_SECONDS)
+                log.error("pipeline ended: %s", error)
+                return 1
 
     def _enter(self, mode: Mode, pipeline: Pipeline, reason: str) -> None:
         if mode is self._mode:
@@ -166,8 +169,13 @@ class Supervisor:
         else:
             log.info("camera off (%s)", reason)
             pipeline.pause()
-            self._idle_since = time.monotonic()
         self._mode = mode
+
+    def _nudge(self, reason: str) -> bool:
+        """Ask for a re-enumeration, subject to the Nudger's guards."""
+        if self._nudger is None:
+            return False
+        return self._nudger.nudge(reason)
 
     def _wait_for_node(self, timeout: float = 120.0):
         """Wait for the camera's PipeWire node, nudging WirePlumber once.
@@ -176,16 +184,17 @@ class Supervisor:
         before the sensor drivers are ready it finds nothing and never looks
         again -- so the node never appears on its own.
         """
-        deadline = time.monotonic() + timeout
+        began = time.monotonic()
+        deadline = began + timeout
         nudged = False
         while time.monotonic() < deadline:
             node = pipewire.current_node(self.camera)
             if node is not None:
                 return node
-            if not nudged and callable(self.on_stale_node):
-                log.warning("no %s camera node yet; re-enumerating", self.camera.key)
-                self.on_stale_node()
-                nudged = True
+            # Grace first: at boot the camera stack is simply slow, and a restart
+            # then would be both useless and disruptive.
+            if not nudged and time.monotonic() - began > NODE_GRACE_SECONDS:
+                nudged = self._nudge(f"no {self.camera.key} camera node")
             time.sleep(3)
         log.error("no %s camera node after %.0fs", self.camera.key, timeout)
         return None

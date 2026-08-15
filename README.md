@@ -127,7 +127,7 @@ camera runs `python3 -m surfacecam.cli run <front|back>`.
 | `surfacecam/pipewire.py` | finds a camera's PipeWire node — pure functions over `pw-dump` JSON |
 | `surfacecam/loopback.py` | the loopback device: state and format from sysfs, consumers from `fuser` |
 | `surfacecam/pipeline.py` | builds the GStreamer pipeline and moves it between states |
-| `surfacecam/supervisor.py` | the on-demand policy — decides when the sensor may run |
+| `surfacecam/supervisor.py` | runs one camera's bridge; also holds the on-demand policy, which is disabled by default (see below) |
 | `surfacecam/cli.py` | entry point: `run <front\|back>` and `status` |
 
 `config.py` is also a CLI, so the shell scripts ask it rather than keeping a second
@@ -141,26 +141,31 @@ python3 -m surfacecam.config services          # camera-bridge@front camera-brid
 python3 -m surfacecam.config modprobe-options  # the v4l2loopback arguments
 ```
 
-### The camera runs only while something is watching
+### The camera streams continuously, and the privacy LED stays on
 
-The bridge previously streamed continuously, which left the privacy LED lit and the
-sensor powered whether or not anyone was using the camera — a security problem before
-it is a battery one: a light that is always on tells you nothing.
+As shipped, the bridge holds the sensor open for as long as the service runs. The
+privacy LED is therefore lit whenever the service is up, whether or not any app is
+using the camera. That is worth knowing before you install this: an indicator that is
+always on tells you nothing about whether you are being recorded.
 
-The pipeline now stays attached to the loopback but is parked in `PAUSED` whenever no
-process has the device open. `v4l2sink` keeps the device claimed with its format set,
-so every app still lists a working camera, while `pipewiresrc` stops pulling — the
-sensor powers down and the LED goes out. It resumes within about a second of an app
-opening the device (the supervisor polls twice a second), and keeps streaming for ~5s
-after the last consumer leaves, because apps routinely close and immediately reopen
-the device while negotiating and tearing the sensor down in that gap makes the stream
-flap.
+On-demand streaming — parking the pipeline in `PAUSED` while no process has the
+loopback open, so the sensor powers down and the LED goes out — is implemented in
+`surfacecam/supervisor.py` but **disabled**, behind `ON_DEMAND` in
+`surfacecam/config.py`. It is off because it does not work: the supervisor correctly
+notices a consumer and returns the pipeline to `PLAYING`, and the journal duly logs
+`camera on (1 consumer(s))`, but the consumer then receives no frames at all — a 40s
+`ffmpeg` capture produced zero images and no error message. `v4l2sink` and
+`v4l2loopback` evidently do not resume cleanly from `PAUSED` once a consumer has
+already opened the device. Trading a working camera for a truthful LED is the wrong
+trade, so it ships off; the code stays because the goal is still right.
 
-Stopping the producer outright would be simpler, and does not work: v4l2loopback 0.15.3
-has no `keep_format` parameter, so a device with no producer reverts to
-`state=output` with no format, and apps then either skip it or show a blank picture.
-[`docs/RUNBOOK.md`](docs/RUNBOOK.md) has the commands to verify the behaviour on your
-own machine.
+Stopping the producer outright when idle is the obvious alternative, and it is not
+available: v4l2loopback 0.15.3 has no `keep_format` parameter (`modinfo v4l2loopback`
+lists only `debug`, `max_buffers`, `max_openers`, `devices`, `video_nr`, `card_label`,
+`exclusive_caps`, `max_width`, `max_height`), so a device with no producer reverts to
+`state=output` with no format, and apps then stop listing it. Ubuntu resolute/universe
+ships no newer version. [`docs/RUNBOOK.md`](docs/RUNBOOK.md) has the commands to
+inspect this on your own machine.
 
 ## Tests
 
@@ -170,9 +175,10 @@ Unit tests, standard library only — no pytest, no camera, no root:
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-26 tests over camera identification against a recorded `pw-dump` (including a
+39 tests over camera identification against a recorded `pw-dump` (including a
 regression test for the back camera vanishing when libcamera reported no
-`api.libcamera.location`), the on-demand policy, and the pipeline description.
+`api.libcamera.location`), the WirePlumber nudge guards, the pipeline description,
+and the on-demand policy — which is tested but not enabled, see above.
 
 The hardware tests — capture, rollback, and the browser probe — need the camera and,
 for `dmesg`, root. See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for those and for the rest

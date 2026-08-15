@@ -17,7 +17,11 @@ Entry format (use exactly this shape):
 <!-- append ADRs below, newest first -->
 
 ## ADR-005 — Stream on demand by parking the pipeline in PAUSED (2026-08-15)
-- status: accepted
+- status: accepted, implemented, shipped DISABLED — the mechanism does not work in
+  practice (see consequences). The code remains behind `config.ON_DEMAND`, which is
+  `False`; the shipped bridge streams continuously and the privacy LED stays lit. The
+  context and the `keep_format` finding below still hold and still rule out the
+  obvious alternative, so this ADR is kept rather than withdrawn.
 - context: the bridge held the sensor open for as long as the service ran, so the
   camera streamed 24/7 whether or not anything was watching. The privacy LED was
   therefore lit permanently — a security problem before it is a battery one, because
@@ -28,7 +32,8 @@ Entry format (use exactly this shape):
   `card_label`, `exclusive_caps`, `max_*` and nothing else), so a loopback with no
   producer reverts to `state=output` with an empty format, and apps then either skip
   the device or show a blank picture. Verified on this machine.
-- decision: the pipeline stays attached to the loopback for the life of the service
+- decision (as taken; see status and consequences for how it ended up): the pipeline
+  stays attached to the loopback for the life of the service
   and is moved between `PLAYING` and `PAUSED` instead of being torn down. `v4l2sink`
   keeps the device claimed with its format set, so it stays `state=capture` and every
   app keeps listing it, while `pipewiresrc` stops pulling and the sensor powers down —
@@ -46,15 +51,30 @@ Entry format (use exactly this shape):
   documenting the LED — rejected, that is the security problem, not a workaround for
   it; no linger at all — rejected, apps routinely close and immediately reopen the
   device while negotiating, and pausing in that gap makes the stream visibly flap.
-- consequences: the camera is on only while something is watching, and the LED becomes
-  a truthful indicator. The costs are a ~0.5s poll (about 30ms of `fuser` each time,
-  which is why sysfs and `fuser` replaced `v4l2-ctl` and a `/proc/*/fd` walk), up to
-  about a second of latency on the first frame after an app opens the device, and up
-  to 5s of streaming after the last one leaves. `surfacecam.cli status` counts the
-  bridge's own producer among a device's `watchers`, so an idle camera reads
-  `watchers=1` rather than 0. If a future v4l2loopback gains `keep_format`, the
-  simpler "stop the producer" design becomes available and this ADR should be
-  revisited.
+- consequences: **the decision did not survive contact with the hardware, and ships
+  off.** Enabling it starves consumers: the supervisor detects a consumer and returns
+  the pipeline to `PLAYING`, the journal logs `camera on (1 consumer(s))`, and the
+  consumer then receives zero frames — measured with a 40s `ffmpeg` capture that
+  produced no images and no error message. The pre-build probe (`tests/pause-probe.py`)
+  asked only whether `PAUSED` stops the sensor while the loopback keeps its format; it
+  did not ask whether a consumer that opens the device *during* the paused period ever
+  gets frames after the resume, and that is the case that fails. `v4l2sink` and
+  `v4l2loopback` evidently do not resume cleanly from `PAUSED` once a consumer holds
+  the device. Trading a working camera for a truthful LED is the wrong trade, so
+  `config.ON_DEMAND` is `False`: the bridge streams continuously, the LED is always on
+  and therefore carries no information, and the security problem in the context above
+  is unfixed rather than solved. What the work bought regardless: the policy is a
+  tested pure function (`decide`), and the `keep_format` finding stands — the obvious
+  "stop the producer when idle" design remains impossible on v4l2loopback 0.15.3, and
+  Ubuntu resolute/universe ships no newer version. Had it been enabled, the costs would
+  have been a ~0.5s poll (about 30ms of `fuser` each time, which is why sysfs and
+  `fuser` replaced `v4l2-ctl` and a `/proc/*/fd` walk), up to about a second of latency
+  on the first frame, and up to 5s of streaming after the last consumer leaves.
+  `surfacecam.cli status` counts the bridge's own producer among a device's `watchers`
+  either way, so an idle camera reads `watchers=1` rather than 0. Reviving this needs
+  either a resume path `v4l2loopback` tolerates, or a future `keep_format` that makes
+  the simpler "stop the producer" design available; until one exists, do not flip the
+  flag.
 
 ## ADR-004 — Move the bridge into a Python package with a single source of truth (2026-08-15)
 - status: accepted
@@ -92,10 +112,9 @@ Entry format (use exactly this shape):
   invites putting the `pw-dump` call back inside the matching code.
 - consequences: `python3` joins the package dependency list, and the shell scripts now
   fail loudly if `surfacecam.config` cannot be imported rather than proceeding on a
-  stale copy of the camera list. `scripts/camera-bridge.sh` is superseded and being
-  retired — nothing runs it any more except `uninstall.sh`, best-effort, to stop a
-  feeder someone started by hand — and `python3 -m surfacecam.cli status` replaces its
-  `status`. GStreamer is
+  stale copy of the camera list. `scripts/camera-bridge.sh` was deleted in the same
+  commit and the `uninstall.sh` call to it removed; nothing references it any more, and
+  `python3 -m surfacecam.cli status` replaces its `status`. GStreamer is
   imported lazily inside `Pipeline`, so the package stays importable — and testable —
   on a machine with no GObject bindings; the price is that a missing `python3-gi`
   surfaces when the bridge starts rather than at import, on a distro where the desktop

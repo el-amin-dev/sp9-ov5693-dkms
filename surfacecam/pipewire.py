@@ -30,8 +30,19 @@ class Node:
     state: str | None
 
     @property
-    def is_running(self) -> bool:
-        return self.state == "running"
+    def sort_key(self) -> int:
+        """Higher means more recently created.
+
+        PipeWire hands out object serials in increasing order, so when a module
+        reload leaves an invalidated node advertised alongside its replacement --
+        same ACPI path, same model, one of them dead -- the newer serial is the
+        live one. Without this the winner was whichever the dump happened to list
+        first, and binding to the dead one fails with EINVAL.
+        """
+        try:
+            return int(self.serial)
+        except ValueError:
+            return -1
 
 
 def parse_nodes(dump: Iterable[dict[str, Any]]) -> list[Node]:
@@ -76,9 +87,10 @@ def find_node(nodes: Sequence[Node], camera: Camera) -> Node | None:
         lambda n: n.model == camera.model,
     )
     for matches in strategies:
-        for node in nodes:
-            if matches(node):
-                return node
+        candidates = [node for node in nodes if matches(node)]
+        if candidates:
+            # Newest wins: a reload can leave a dead node beside the live one.
+            return max(candidates, key=lambda node: node.sort_key)
     return None
 
 

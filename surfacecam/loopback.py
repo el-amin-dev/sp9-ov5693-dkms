@@ -8,11 +8,14 @@ gets made too rarely to be responsive.
 
 from __future__ import annotations
 
+import logging
 import pathlib
 import subprocess
 from dataclasses import dataclass
 
 from .config import Camera
+
+log = logging.getLogger("surfacecam")
 
 SYSFS = pathlib.Path("/sys/class/video4linux")
 MODULE = pathlib.Path("/sys/module/v4l2loopback")
@@ -78,6 +81,11 @@ def consumers(device: str, ignore_pids: frozenset[int] = frozenset()) -> set[int
         completed = subprocess.run(
             ["fuser", device], capture_output=True, text=True, timeout=5, check=False
         )
+    except FileNotFoundError:
+        # A silent empty set here would read as "nobody is watching", which with
+        # on-demand enabled parks the camera off forever. Say so instead.
+        log.warning("fuser not found (install psmisc); cannot detect camera users")
+        return set()
     except (OSError, subprocess.TimeoutExpired):
         return set()
 

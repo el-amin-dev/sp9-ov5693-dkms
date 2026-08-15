@@ -95,15 +95,35 @@ class Pipeline:
             self._set("NULL")
             self._pipeline = None
 
-    def failed(self) -> str | None:
-        """Return the first error on the bus, if the pipeline has posted one."""
+    def wait_for_end(self, timeout: float) -> str | None:
+        """Block up to `timeout` seconds for the pipeline to stop being useful.
+
+        Returns a description of what went wrong, or None if it is still healthy.
+
+        EOS counts as an ending, not only ERROR: a source that reaches
+        end-of-stream leaves the pipeline alive but producing nothing, which as a
+        service means a camera that is listed, opens, and stays black forever.
+        The caller is expected to exit so systemd can restart it.
+
+        Callers must not poll the bus themselves. Reading a message consumes it,
+        so a second reader would swallow the only notification the first one was
+        waiting for.
+        """
         if self._pipeline is None:
-            return None
+            return "pipeline not started"
         from gi.repository import Gst
 
-        bus = self._pipeline.get_bus()
-        message = bus.poll(Gst.MessageType.ERROR, 0)
+        # Gst has its own sentinel for "no timeout"; passing math.inf here raises
+        # OverflowError on the int() conversion.
+        nanoseconds = (
+            Gst.CLOCK_TIME_NONE if timeout == float("inf") else int(timeout * Gst.SECOND)
+        )
+        message = self._pipeline.get_bus().timed_pop_filtered(
+            nanoseconds, Gst.MessageType.ERROR | Gst.MessageType.EOS
+        )
         if message is None:
             return None
+        if message.type == Gst.MessageType.EOS:
+            return "end of stream"
         error, _debug = message.parse_error()
         return error.message

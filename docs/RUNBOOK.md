@@ -97,8 +97,11 @@ sudo dmesg | grep -E 'stream (stop|close) time out'   # expect no output
 
 ## Source provenance
 
-`src/ov5693.c` is upstream Linux **v6.19** `drivers/media/i2c/ov5693.c` plus the two
-patches in `patches/`. That claim is machine-checkable:
+`src/ov5693.c` is the upstream `drivers/media/i2c/ov5693.c` named in
+`patches/upstream.pin` (currently **v6.19**) plus the two patches in `patches/`. The
+tag and sha256 live only in that pin file — never duplicated in a code comment — and
+`--rebase` rewrites it, so the pin cannot end up claiming a provenance `src/` does not
+have. The claim is machine-checkable:
 
 ```bash
 ./scripts/fetch-upstream.sh            # re-download, reapply, diff against src/
@@ -136,6 +139,10 @@ for v in 0x2d 0x20 0x24 0x04 0x14; do
   echo "== $v"; sudo RESOLUTIONS=1920x1080 ./tests/test-capture.sh | tail -3
 done
 ```
+
+Valid values are `0`–`255` (the register is 8-bit) or `-1` to skip the write.
+Anything else is rejected with `EINVAL`/`ERANGE` at load or sysfs-write time rather
+than being truncated, so a sweep cannot silently retest a value it already tried.
 
 Make the winner permanent in `/etc/modprobe.d/ov5693.conf`
 (`options ov5693 mipi_ctrl00=0x20`), then change the default in `src/ov5693.c` and

@@ -94,10 +94,19 @@ for o in json.load(sys.stdin):
 ' "$1"
 }
 
-# Does libcamera itself see this camera? Distinguishes "drivers not up yet" from
+# Are the sensor drivers up? Distinguishes "drivers not ready yet" from
 # "WirePlumber missed the camera", which need different responses.
-libcamera_sees_any() {
-	timeout 20 cam -l 2>/dev/null | grep -qE '^[0-9]+:'
+#
+# Deliberately reads sysfs rather than asking libcamera: `cam -l` blocks while
+# another process is streaming a camera, ignores SIGTERM while blocked, and so
+# hangs forever even under timeout(1) without -k. A bound i2c device is the same
+# signal without the ability to wedge the service.
+sensors_bound() {
+	local d
+	for d in /sys/bus/i2c/drivers/ov*/*:*; do
+		[[ -e ${d} ]] && return 0
+	done
+	return 1
 }
 
 # Wait for the camera's PipeWire node, nudging WirePlumber if it clearly missed it.
@@ -112,7 +121,7 @@ wait_for_node() {
 	while :; do
 		SERIAL="$(camera_serial "${loc}")"
 		[[ -n ${SERIAL} ]] && return 0
-		if [[ ${nudged} -eq 0 ]] && [[ ${SECONDS} -gt 15 ]] && libcamera_sees_any; then
+		if [[ ${nudged} -eq 0 ]] && [[ ${SECONDS} -gt 15 ]] && sensors_bound; then
 			if mkdir "${lock}" 2>/dev/null; then
 				log "libcamera sees the camera but PipeWire has no node; restarting wireplumber"
 				systemctl --user restart wireplumber || true

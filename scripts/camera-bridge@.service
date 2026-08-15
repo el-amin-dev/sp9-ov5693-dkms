@@ -13,16 +13,17 @@ Description=Publish the Surface %i camera as a V4L2 device
 # PipeWire owns the libcamera source this bridge reads from.
 After=pipewire.service wireplumber.service
 Wants=pipewire.service wireplumber.service
+# Never give up. The camera stack can take a while to appear after boot, and the
+# default start limit would put the unit permanently in "failed" after a handful
+# of quick retries -- which is what left the camera dead after a reboot.
+# This key belongs to [Unit]; systemd silently ignores it under [Service].
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart=%REPO%/scripts/camera-bridge.sh run %i
 Restart=always
 RestartSec=5
-# Never give up. The camera stack can take a while to appear after boot, and the
-# default start-limit would put the unit permanently in "failed" after a handful
-# of quick retries -- which is exactly what left the camera dead after a reboot.
-StartLimitIntervalSec=0
 
 [Install]
 WantedBy=default.target

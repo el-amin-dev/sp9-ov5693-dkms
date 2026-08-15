@@ -68,6 +68,41 @@ for o in json.load(sys.stdin):
 ' "$1"
 }
 
+# Does libcamera itself see this camera? Distinguishes "drivers not up yet" from
+# "WirePlumber missed the camera", which need different responses.
+libcamera_sees_any() {
+	timeout 20 cam -l 2>/dev/null | grep -qE '^[0-9]+:'
+}
+
+# Wait for the camera's PipeWire node, nudging WirePlumber if it clearly missed it.
+#
+# At boot WirePlumber enumerates libcamera once, before the IPU6 and sensor
+# drivers are ready, finds no cameras, and never looks again -- so the node simply
+# never appears and the bridge would fail forever. If libcamera can see the camera
+# but PipeWire has no node for it, WirePlumber is the stale one: restart it. The
+# lock keeps the two instances from restarting it on top of each other.
+wait_for_node() {
+	local loc=$1 deadline=$((SECONDS + 120)) nudged=0 lock=/tmp/camera-bridge-wp-nudge.lock
+	while :; do
+		SERIAL="$(camera_serial "${loc}")"
+		[[ -n ${SERIAL} ]] && return 0
+		if [[ ${nudged} -eq 0 ]] && [[ ${SECONDS} -gt 15 ]] && libcamera_sees_any; then
+			if mkdir "${lock}" 2>/dev/null; then
+				log "libcamera sees the camera but PipeWire has no node; restarting wireplumber"
+				systemctl --user restart wireplumber || true
+				sleep 6
+				rmdir "${lock}" 2>/dev/null || true
+			else
+				sleep 6 # another instance is doing it
+			fi
+			nudged=1
+			continue
+		fi
+		[[ ${SECONDS} -lt ${deadline} ]] || return 1
+		sleep 3
+	done
+}
+
 resolve() {
 	local loc=$1
 	CARD="$(label_for "${loc}")" || die "unknown camera '${loc}' (use front or back)"
@@ -75,8 +110,8 @@ resolve() {
 	[[ -e /sys/module/v4l2loopback ]] ||
 		die "v4l2loopback is not loaded; run: sudo ./scripts/camera-bridge-setup.sh"
 	DEV="$(loopback_device "${CARD}")" || die "no loopback device labelled '${CARD}'"
-	SERIAL="$(camera_serial "${loc}")"
-	[[ -n ${SERIAL} ]] || die "no ${loc} camera in PipeWire"
+	wait_for_node "${loc}" ||
+		die "no ${loc} camera in PipeWire after 120s (check: cam -l, systemctl --user status wireplumber)"
 }
 
 run_pipeline() {

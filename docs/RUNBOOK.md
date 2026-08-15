@@ -133,6 +133,33 @@ After this, Chrome, Firefox, Zoom, Teams and GNOME Snapshot see two cameras,
 **Surface Front Camera** and **Surface Back Camera**. No browser flags, no
 `chrome://flags`, no portal.
 
+### Cameras gone after a reboot
+
+Symptom: everything worked, you reboot, and the browser shows no camera. Check:
+
+```bash
+systemctl --user status camera-bridge@front
+pw-dump | grep -c libcamera        # 0 means WirePlumber has no camera nodes
+cam -l                             # but libcamera itself still sees them
+```
+
+Cause: WirePlumber enumerates libcamera **once**, at startup. At boot it can run
+before the IPU6 and sensor drivers are ready, find no cameras, and never look again,
+so the PipeWire nodes never appear. The bridge then has nothing to read from.
+
+The bridge handles this itself now: it waits up to 120s for its node, and if
+libcamera can see the camera while PipeWire cannot, it restarts WirePlumber once.
+The unit also sets `Restart=always` with `StartLimitIntervalSec=0`, because the
+default start limit put it permanently in `failed` after a few quick retries -- which
+is what left the camera dead until the service was restarted by hand.
+
+To fix it manually:
+
+```bash
+systemctl --user restart wireplumber
+systemctl --user restart camera-bridge@front camera-bridge@back
+```
+
 ### "Device is not a output device"
 
 `exclusive_caps=1` means a loopback flips to capture-only once a consumer opens it,

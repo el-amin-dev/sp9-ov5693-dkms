@@ -43,7 +43,9 @@ done
 for cam in "${CAMERAS[@]}"; do
 	./scripts/camera-bridge.sh stop "${cam}" >/dev/null 2>&1 || true
 done
-rm -f "${USER_UNIT}"
+rm -f "${USER_UNIT}" \
+	"${HOME}/.config/systemd/user/camera-bridge.service" \
+	"${HOME}/.config/systemd/user/default.target.wants/camera-bridge.service"
 systemctl --user daemon-reload 2>/dev/null || true
 ok "services removed"
 

@@ -154,6 +154,15 @@ fi
 # --- 3. the bridge services --------------------------------------------------
 log "Step 3/3: PipeWire -> V4L2 bridge services"
 mkdir -p "$(dirname "${USER_UNIT}")"
+# Older versions shipped a single non-templated unit. Left behind, its dangling
+# autostart symlink fails on every boot, so clear it before installing the template.
+if [[ -e "${HOME}/.config/systemd/user/camera-bridge.service" ]] ||
+	[[ -L "${HOME}/.config/systemd/user/default.target.wants/camera-bridge.service" ]]; then
+	systemctl --user disable --now camera-bridge.service 2>/dev/null || true
+	rm -f "${HOME}/.config/systemd/user/camera-bridge.service" \
+		"${HOME}/.config/systemd/user/default.target.wants/camera-bridge.service"
+	ok "removed the superseded single-camera unit"
+fi
 sed "s|%REPO%|$(pwd)|" "scripts/camera-bridge@.service" >"${USER_UNIT}"
 systemctl --user daemon-reload
 for cam in "${CAMERAS[@]}"; do

@@ -95,6 +95,107 @@ timeout 30 cam -c 1 -C5 -s width=1920,height=1080 --file=/tmp/frame-#.raw
 sudo dmesg | grep -E 'stream (stop|close) time out'   # expect no output
 ```
 
+## Making the camera usable in browsers and apps
+
+The kernel fix alone does not give you a webcam. The sensor reaches userspace only
+through libcamera's software ISP, which PipeWire publishes as a `Video/Source`.
+Ordinary apps do not see that, so a bridge republishes it as a normal V4L2 device.
+
+```bash
+# one-time, needs root
+sudo apt-get install -y v4l2loopback-dkms v4l2loopback-utils
+sudo ./scripts/camera-bridge-setup.sh --persist    # /dev/video42, "Surface Front Camera"
+
+# the feeder, as a supervised user service (starts at login)
+mkdir -p ~/.config/systemd/user
+sed "s|%REPO%|$PWD|" scripts/camera-bridge.service > ~/.config/systemd/user/camera-bridge.service
+systemctl --user daemon-reload
+systemctl --user enable --now camera-bridge
+```
+
+Check it:
+
+```bash
+systemctl --user status camera-bridge
+v4l2-ctl -d /dev/video42 --list-formats-ext      # expect one: YUYV 1280x720 @30fps
+./scripts/camera-bridge.sh status
+```
+
+After this, Chrome, Firefox, Zoom, Teams and GNOME Snapshot see a single camera
+named **Surface Front Camera**. No browser flags, no `chrome://flags`, no portal.
+
+### Why a loopback rather than the PipeWire path
+
+Chrome can talk to PipeWire cameras via `chrome://flags/#enable-webrtc-pipewire-camera`,
+and that flag does work — Chrome finds the camera. But every access then goes through
+the xdg camera portal, and on GNOME it is refused:
+
+```
+xdg-desktop-portal-gnome: Failed to associate portal window with parent window
+xdg-desktop-portal: AccessDenied: Only the focused app is allowed to show a system access dialog
+webrtc/.../camera_portal.cc: Camera access denied by the XDG portal.
+```
+
+Chrome requests the camera from its **video-capture utility process**, which owns no
+window. GNOME only shows the permission dialog for the focused window, so the dialog
+can never appear and the request is denied. Clicking, focusing, or running Chrome
+under native Wayland does not change it. The loopback sidesteps the portal entirely.
+
+The other route would be to pre-authorise the portal:
+
+```bash
+gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore \
+  --object-path /org/freedesktop/impl/portal/PermissionStore \
+  --method org.freedesktop.impl.portal.PermissionStore.SetPermission \
+  "devices" true "camera" "" "['yes']"
+```
+
+That was not used here: it only helps portal-aware apps, whereas the loopback works
+for everything.
+
+### The resolution trap
+
+Measured on this sensor through PipeWire:
+
+| Requested | Result |
+|---|---|
+| 640x480 | **all-zero (black)** |
+| 1280x720 | **all-zero (black)** |
+| 1920x1080 | real picture, mean ≈ 147 |
+| 2592x1944 | no frames within 60s |
+
+Anything under ~1296px wide comes back black from the software ISP. Browsers default
+to 640x480, so a direct connection looks black even when everything is wired
+correctly. The bridge therefore **captures at 1920x1080 always** and downscales to a
+single advertised 1280x720 YUY2 mode, so clients get a real picture whatever they ask
+for. Do not "simplify" the bridge by capturing at the output size.
+
+### Undoing all of it
+
+```bash
+systemctl --user disable --now camera-bridge
+rm ~/.config/systemd/user/camera-bridge.service && systemctl --user daemon-reload
+sudo ./scripts/camera-bridge-setup.sh --undo      # unload module, remove /etc files
+sudo apt-get remove v4l2loopback-dkms v4l2loopback-utils   # optional
+```
+
+Files created outside this repo: `~/.config/systemd/user/camera-bridge.service`,
+`/etc/modprobe.d/v4l2loopback-surface.conf`, `/etc/modules-load.d/v4l2loopback-surface.conf`.
+
+### Testing the browser end
+
+```bash
+./tests/browser-camera-test.sh                 # Chrome, PipeWire backend (will fail: portal)
+./tests/browser-camera-test.sh --no-pipewire   # Chrome via the loopback (expect PASS)
+./tests/browser-camera-test.sh --headful       # visible window
+```
+
+The probe saves the frame the browser itself captured to `out/chrome-capture.jpg` and
+its verdict to `out/browser-result.json`. Headless runs are unreliable for this —
+Chrome throttles timers in hidden pages and reuses an already-running instance for the
+same `--user-data-dir`, so use a fresh profile directory when a run seems to ignore
+page changes.
+
 ## Source provenance
 
 `src/ov5693.c` is the upstream `drivers/media/i2c/ov5693.c` named in

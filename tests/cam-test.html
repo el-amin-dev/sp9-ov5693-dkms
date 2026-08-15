@@ -1,0 +1,149 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>camera probe</title>
+<style>
+  body { background: #222; color: #eee; font: 14px monospace; margin: 0 }
+  #stage { display: flex; gap: 8px; align-items: flex-start }
+  video, canvas { width: 480px; background: #000 }
+  pre { white-space: pre-wrap }
+</style>
+<button id="go" style="font-size:28px;padding:20px 40px;margin:12px">▶ START CAMERA TEST</button>
+<div id="stage"><video id="v" autoplay playsinline muted></video><canvas id="c"></canvas></div>
+<pre id="out">RESULT: waiting for you to press the button</pre>
+<script>
+// Probe page for the browser side of the camera pipeline. Everything it learns
+// is written into #out as RESULT: lines, so `chrome --dump-dom` can read them
+// without a screenshot. Kept dependency-free and offline.
+const out = document.getElementById('out');
+const lines = [];
+function say(s) { lines.push(s); out.textContent = lines.join('\n'); }
+
+// The page is served from a local http server (127.0.0.1 counts as a secure
+// context, so getUserMedia works) and posts its findings back when done.
+// --dump-dom cannot be used instead: it snapshots at load, long before the
+// camera has opened and auto-exposure has settled.
+// Two-phase on purpose. sendBeacon silently caps payloads at 64KB, and a 720p
+// JPEG is far bigger, so the verdict is posted on its own first -- it must never
+// be lost because the image failed -- and the frame follows as a separate POST.
+async function report(verdict, jpeg) {
+  try {
+    await fetch('/result', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verdict, lines }, null, 1),
+    });
+    say('RESULT: verdict posted');
+  } catch (e) {
+    say('RESULT: verdict POST failed ' + e.message);
+  }
+  if (!jpeg) return;
+  try {
+    await fetch('/image', { method: 'POST', body: jpeg });
+    say('RESULT: frame posted (' + Math.round(jpeg.length / 1024) + ' KB)');
+  } catch (e) {
+    say('RESULT: frame POST failed ' + e.message);
+  }
+}
+
+// Mean/stddev of the luma plane, so a black frame is unambiguous.
+function frameStats(canvas, video) {
+  const w = video.videoWidth, h = video.videoHeight;
+  if (!w || !h) return null;
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(video, 0, 0, w, h);
+  const d = ctx.getImageData(0, 0, w, h).data;
+  let sum = 0, sumSq = 0;
+  const n = w * h;
+  for (let i = 0; i < d.length; i += 4) {
+    const y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    sum += y; sumSq += y * y;
+  }
+  const mean = sum / n;
+  return { w, h, mean, stddev: Math.sqrt(Math.max(0, sumSq / n - mean * mean)) };
+}
+
+// GNOME's portal refuses to show the camera dialog unless the requesting window
+// is the focused app ("Only the focused app is allowed to show a system access
+// dialog"). Driving getUserMedia from a real click guarantees both the focus and
+// the user gesture, which is also how a real website behaves.
+// Last-resort watchdog: a run that stalls must still say where it got to,
+// otherwise the harness just times out with nothing to read.
+let finished = false;
+setTimeout(() => {
+  if (!finished) { say('RESULT: FAIL watchdog fired, stalled above'); report('FAIL-STALL'); }
+}, 30000);
+
+async function run() {
+  try {
+    // Requested width is deliberately high: this sensor's software ISP returns
+    // all-zero buffers below ~1296px wide, so a default 640x480 negotiation
+    // yields a black picture even when everything else is wired correctly.
+    const want = new URLSearchParams(location.search).get('w') || '1920';
+    const constraints = { video: { width: { ideal: +want }, height: { ideal: Math.round(want * 9 / 16) } } };
+    say('RESULT: requesting ' + JSON.stringify(constraints));
+
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    const track = stream.getVideoTracks()[0];
+    say('RESULT: gum ok, track="' + track.label + '"');
+    say('RESULT: settings ' + JSON.stringify(track.getSettings()));
+
+    // Device labels are only exposed after permission is granted.
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    const cams = devs.filter(d => d.kind === 'videoinput');
+    say('RESULT: videoinput count=' + cams.length);
+    cams.forEach((d, i) => say('RESULT: cam[' + i + '] "' + d.label + '"'));
+
+    const v = document.getElementById('v');
+    v.srcObject = stream;
+
+    // play() can stay pending forever in headless if no frame is ever presented,
+    // so never await it unguarded -- race it against a timeout and carry on.
+    await Promise.race([
+      v.play().then(() => say('RESULT: play() resolved')).catch(e => say('RESULT: play() rejected ' + e.name)),
+      new Promise(r => setTimeout(() => { say('RESULT: play() still pending after 5s'); r(); }, 5000)),
+    ]);
+
+    // Wait for real dimensions rather than assuming they are ready.
+    for (let i = 0; i < 30 && !v.videoWidth; i++) {
+      await new Promise(r => setTimeout(r, 250));
+    }
+    say('RESULT: videoWidth=' + v.videoWidth + ' readyState=' + v.readyState);
+
+    // Let auto-exposure settle before judging the picture.
+    await new Promise(r => setTimeout(r, 3000));
+
+    const st = frameStats(document.getElementById('c'), v);
+    if (!st) { finished = true; say('RESULT: FAIL no video dimensions'); report('FAIL'); return; }
+    say('RESULT: frame ' + st.w + 'x' + st.h +
+        ' mean=' + st.mean.toFixed(2) + ' stddev=' + st.stddev.toFixed(2));
+    const live = st.mean > 2 && st.stddev > 2;
+    say(live
+      ? 'RESULT: PASS live picture in browser'
+      : 'RESULT: FAIL black frame (stream opened but no content)');
+    // Ship the frame itself back, so the picture can be inspected outside the
+    // browser instead of taken on trust.
+    finished = true;
+    report(live ? 'PASS' : 'FAIL-BLACK',
+           document.getElementById('c').toDataURL('image/jpeg', 0.9));
+  } catch (e) {
+    finished = true;
+    say('RESULT: FAIL ' + e.name + ': ' + e.message);
+    report('FAIL-' + e.name);
+  }
+}
+document.getElementById('go').addEventListener('click', () => {
+  document.getElementById('go').disabled = true;
+  say('RESULT: started from user click');
+  run();
+});
+
+// ?auto=1 skips the click, for headless runs. Only safe once the camera no
+// longer goes through the portal -- the portal's focused-window requirement is
+// precisely what the click was there to satisfy.
+if (new URLSearchParams(location.search).get('auto') === '1') {
+  document.getElementById('go').disabled = true;
+  say('RESULT: auto-started (headless)');
+  run();
+}
+</script>

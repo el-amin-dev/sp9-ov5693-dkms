@@ -34,3 +34,6 @@ Thumbs.db
 *.log
 tmp/
 .cache/
+
+# --- test artifacts / captures ---
+out/

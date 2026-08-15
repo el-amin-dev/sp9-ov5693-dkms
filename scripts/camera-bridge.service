@@ -1,0 +1,29 @@
+# User service that keeps the front camera published as a normal V4L2 webcam.
+#
+# Install (no root needed -- this is a user unit):
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/camera-bridge.service ~/.config/systemd/user/
+#   sed -i "s|%REPO%|$PWD|" ~/.config/systemd/user/camera-bridge.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now camera-bridge
+#
+# Undo:
+#   systemctl --user disable --now camera-bridge
+#   rm ~/.config/systemd/user/camera-bridge.service && systemctl --user daemon-reload
+
+[Unit]
+Description=Publish the Surface front camera as a V4L2 device
+# PipeWire owns the libcamera source this bridge reads from.
+After=pipewire.service wireplumber.service
+Wants=pipewire.service wireplumber.service
+
+[Service]
+Type=simple
+# start blocks until the gst pipeline is up, then the pidfile tracks it; running
+# the pipeline in the foreground here instead keeps systemd as the supervisor.
+ExecStart=%REPO%/scripts/camera-bridge.sh run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

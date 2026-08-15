@@ -11,6 +11,9 @@ set -uo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")" || exit 1
 
 readonly USER_UNIT="${HOME}/.config/systemd/user/camera-bridge@.service"
+readonly BIN_DIR="${HOME}/.local/bin"
+readonly COMMANDS=(start-camera stop-camera surface-camera)
+readonly PATH_MARKER="# added by sp9-ov5693-dkms (surface camera commands)"
 readonly PKGS=(v4l2loopback-dkms v4l2loopback-utils)
 
 log() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -64,6 +67,23 @@ rm -f "${USER_UNIT}" \
 	"${HOME}/.config/systemd/user/default.target.wants/camera-bridge.service"
 systemctl --user daemon-reload 2>/dev/null || true
 ok "services removed"
+
+# --- start/stop commands -----------------------------------------------------
+log "Removing the camera commands"
+for cmd in "${COMMANDS[@]}"; do
+	rm -f "${BIN_DIR:?}/${cmd}"
+done
+# Take back the PATH lines we added, matched on our own marker so nothing else
+# in the user's shell configuration is touched.
+for rc in "${HOME}/.profile" "${HOME}/.bashrc" "${HOME}/.zshrc"; do
+	[[ -e ${rc} ]] || continue
+	grep -qF "${PATH_MARKER}" "${rc}" 2>/dev/null || continue
+	# Delete the marker and the single export line that follows it.
+	sed -i "/$(printf '%s' "${PATH_MARKER}" | sed 's/[][\.*^$/]/\\&/g')/,+1d" "${rc}"
+	ok "cleaned PATH entry from ${rc}"
+done
+rm -f "${HOME}/.config/fish/conf.d/sp9-camera.fish"
+ok "commands removed"
 
 # --- loopback devices --------------------------------------------------------
 log "Removing the v4l2loopback devices"

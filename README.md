@@ -57,9 +57,40 @@ PipeWire session belong to your login user.
 ./uninstall.sh --all   # also remove the patched module and the packages it added
 ```
 
+## Turning the cameras on and off
+
+The cameras ship **off**, and nothing turns them on for you — not even at login.
+Two commands control them, from any directory and any shell:
+
+```bash
+start-camera            # cameras on
+stop-camera             # cameras off, sensors powered down, privacy LED out
+surface-camera status   # what is running
+```
+
+Then verify at <https://webcamtests.com>.
+
+While stopped, the sensors are not running and apps will not list the cameras at
+all. That is deliberate: the bridge holds the sensor open the whole time it runs,
+so a camera that is "available" is a camera that is filming. Leaving it off by
+default means the privacy LED tells you the truth — lit means something can see
+you. Run `start-camera` before a call and `stop-camera` after.
+
+To have them start automatically at login anyway:
+
+```bash
+systemctl --user enable --now camera-bridge@front camera-bridge@back
+```
+
+These are ordinary executables in `~/.local/bin`, not shell aliases. An alias only
+exists in interactive shells that source the right file, needs different syntax
+for bash, zsh and fish, and is invisible to scripts, cron jobs and desktop
+launchers. `install.sh` adds `~/.local/bin` to PATH for bash, zsh and fish if it
+is not there already; open a new terminal afterwards.
+
 Afterwards every app — Chrome, Firefox, Zoom, Teams, GNOME Snapshot — sees two
 ordinary webcams, **Surface Front Camera** and **Surface Back Camera**, with no
-browser flags to set. Verify at <https://webcamtests.com>.
+browser flags to set.
 
 ### What it installs
 
@@ -141,7 +172,7 @@ python3 -m surfacecam.config services          # camera-bridge@front camera-brid
 python3 -m surfacecam.config modprobe-options  # the v4l2loopback arguments
 ```
 
-### The camera streams continuously, and the privacy LED stays on
+### While running, the camera streams continuously
 
 As shipped, the bridge holds the sensor open for as long as the service runs. The
 privacy LED is therefore lit whenever the service is up, whether or not any app is

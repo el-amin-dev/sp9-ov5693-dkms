@@ -25,6 +25,10 @@ set -uo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")" || exit 1
 
 readonly USER_UNIT="${HOME}/.config/systemd/user/camera-bridge@.service"
+readonly BIN_DIR="${HOME}/.local/bin"
+readonly COMMANDS=(start-camera stop-camera surface-camera)
+# Marker so the PATH line is added once and can be found again to remove it.
+readonly PATH_MARKER="# added by sp9-ov5693-dkms (surface camera commands)"
 
 # Everything the pipeline needs, by the command it provides:
 #   dkms/build-essential/headers -> building both out-of-tree modules
@@ -110,6 +114,44 @@ apt_install() {
 	ok "installed ${missing[*]}"
 }
 
+# Make sure ~/.local/bin is on PATH for whatever shell the user runs.
+#
+# Each shell reads a different file, and only some of them read ~/.profile:
+# bash uses ~/.bashrc for interactive shells, zsh ignores ~/.profile entirely in
+# favour of ~/.zshrc, and fish does not use POSIX syntax at all. So the line goes
+# wherever it is needed, once, marked so it can be found and removed again.
+ensure_on_path() {
+	case ":${PATH}:" in
+	*":${BIN_DIR}:"*)
+		ok "${BIN_DIR} is already on PATH"
+		return 0
+		;;
+	esac
+
+	local rc added=()
+	for rc in "${HOME}/.profile" "${HOME}/.bashrc" "${HOME}/.zshrc"; do
+		[[ -e ${rc} ]] || continue
+		grep -qF "${PATH_MARKER}" "${rc}" 2>/dev/null && continue
+		printf '\n%s\nexport PATH="$HOME/.local/bin:$PATH"\n' "${PATH_MARKER}" >>"${rc}"
+		added+=("${rc}")
+	done
+
+	local fish_conf="${HOME}/.config/fish/conf.d/sp9-camera.fish"
+	if command -v fish >/dev/null && [[ ! -e ${fish_conf} ]]; then
+		install -d -m 0755 "$(dirname "${fish_conf}")"
+		printf '%s\nfish_add_path "$HOME/.local/bin"\n' "${PATH_MARKER}" >"${fish_conf}"
+		added+=("${fish_conf}")
+	fi
+
+	if [[ ${#added[@]} -gt 0 ]]; then
+		ok "added ${BIN_DIR} to PATH in: ${added[*]}"
+		warn "open a new terminal (or source the file) before the commands resolve"
+	else
+		warn "${BIN_DIR} is not on PATH and no shell profile was found to edit"
+		warn "run the commands by full path, e.g. ${BIN_DIR}/start-camera"
+	fi
+}
+
 device_for() {
 	local label=$1 d
 	for d in /dev/video*; do
@@ -160,7 +202,7 @@ case "${1:-}" in
 esac
 
 # --- 0. dependencies ---------------------------------------------------------
-log "Step 0/3: dependencies"
+log "Step 0/4: dependencies"
 apt_install "${DEPS[@]}"
 # Headers must match the running kernel, whatever it is.
 apt_install "linux-headers-$(uname -r)"
@@ -173,7 +215,7 @@ load_camera_config
 ok "cameras: ${CAMERAS[*]}"
 
 # --- 1. the kernel module ----------------------------------------------------
-log "Step 1/3: patched ov5693 kernel module"
+log "Step 1/4: patched ov5693 kernel module"
 if modinfo -F filename ov5693 2>/dev/null | grep -q updates/dkms; then
 	ok "already installed and active"
 else
@@ -190,7 +232,7 @@ else
 fi
 
 # --- 2. the loopback devices -------------------------------------------------
-log "Step 2/3: v4l2loopback devices"
+log "Step 2/4: v4l2loopback devices"
 have=0
 for label in "${LABELS[@]}"; do
 	device_for "${label}" >/dev/null && have=$((have + 1))
@@ -207,7 +249,7 @@ else
 fi
 
 # --- 3. the bridge services --------------------------------------------------
-log "Step 3/3: PipeWire -> V4L2 bridge services"
+log "Step 3/4: PipeWire -> V4L2 bridge services"
 mkdir -p "$(dirname "${USER_UNIT}")"
 # Older versions shipped a single non-templated unit. Left behind, its dangling
 # autostart symlink fails on every boot, so clear it before installing the template.
@@ -220,28 +262,44 @@ if [[ -e "${HOME}/.config/systemd/user/camera-bridge.service" ]] ||
 fi
 sed "s|%REPO%|$(pwd)|" "scripts/camera-bridge@.service" >"${USER_UNIT}"
 systemctl --user daemon-reload
+# Installed but deliberately NOT enabled and NOT started.
+#
+# The bridge holds the sensor open for as long as it runs, which keeps the
+# privacy LED lit, so the cameras stay off until asked for. start-camera turns
+# them on; nothing does it automatically, including at login.
+# --now as well as disable: `disable` alone leaves an already-running bridge
+# streaming, so a re-run would end with the installer claiming the cameras are
+# off while the LED is still lit.
 for cam in "${CAMERAS[@]}"; do
-	systemctl --user enable --now "camera-bridge@${cam}" ||
-		warn "could not start camera-bridge@${cam}"
+	systemctl --user disable --now "camera-bridge@${cam}" 2>/dev/null || true
 done
-# Poll rather than sleep: a bridge may spend a while waiting for its camera node,
-# and a flat delay reported a still-starting service as failed.
-for cam in "${CAMERAS[@]}"; do
-	for _ in $(seq 1 30); do
-		systemctl --user is-active --quiet "camera-bridge@${cam}" && break
-		sleep 2
-	done
-	# One camera failing must not hide a working other one.
-	if systemctl --user is-active --quiet "camera-bridge@${cam}"; then
-		ok "bridge@${cam} running"
-	else
-		warn "bridge@${cam} failed: systemctl --user status camera-bridge@${cam}"
-	fi
+ok "bridge services installed, left stopped and disabled (use start-camera)"
+
+# --- 4. the start/stop commands ----------------------------------------------
+log "Step 4/4: start-camera / stop-camera"
+install -d -m 0755 "${BIN_DIR}"
+sed "s|%REPO%|$(pwd)|" bin/surface-camera >"${BIN_DIR}/surface-camera"
+chmod 0755 "${BIN_DIR}/surface-camera"
+# Symlinks rather than copies: one implementation, dispatching on the name it was
+# invoked as.
+for cmd in "${COMMANDS[@]}"; do
+	[[ ${cmd} == surface-camera ]] && continue
+	ln -sf surface-camera "${BIN_DIR}/${cmd}"
 done
+ok "installed ${COMMANDS[*]} into ${BIN_DIR}"
+
+ensure_on_path
 
 check
 echo
 shown="$(printf ", '%s'" "${LABELS[@]}")"
-ok "Done. Apps now show ${shown:2}."
-echo "     Try it:   https://webcamtests.com"
+ok "Done. Apps will show ${shown:2} once the cameras are started."
+echo
+echo "     start-camera     turn the cameras on"
+echo "     stop-camera      turn them off (sensors powered down, LED off)"
+echo "     surface-camera status"
+echo
+echo "     The cameras are OFF right now, and stay off until you start them --"
+echo "     nothing starts them at login."
+echo "     Try it:   start-camera && xdg-open https://webcamtests.com"
 echo "     Undo:     ./uninstall.sh"

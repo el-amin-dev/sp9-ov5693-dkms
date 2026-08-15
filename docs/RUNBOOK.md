@@ -112,6 +112,40 @@ in `tests/fixtures/`, including the regression where libcamera reported no
 description, and the on-demand policy — which is tested but disabled in the shipped
 default, see below.
 
+## Turning the cameras on and off
+
+```bash
+start-camera            # start both bridges
+stop-camera             # stop them; sensors power down and the LED goes out
+surface-camera status   # devices, formats, nodes, watchers
+surface-camera restart
+```
+
+Installed as executables in `~/.local/bin` (not shell aliases, so they work in
+every shell, from any directory, and from scripts and launchers). They are
+symlinks to one implementation that dispatches on the name it was called as.
+
+The bridge services are installed **disabled**: nothing starts a camera at login.
+That is what keeps the privacy LED meaningful, since the bridge holds the sensor
+open for as long as it runs. While stopped the loopback devices have no producer,
+so they report `state=output` with no format and apps do not list them.
+
+```bash
+# check by hand
+systemctl --user is-active camera-bridge@front camera-bridge@back
+cat /sys/class/video4linux/video42/state    # capture when running, output when not
+
+# opt in to autostart at login
+systemctl --user enable --now camera-bridge@front camera-bridge@back
+# and back out again
+systemctl --user disable --now camera-bridge@front camera-bridge@back
+```
+
+If the commands are not found, `~/.local/bin` is not on your PATH in that shell.
+`install.sh` adds it to `~/.profile`, `~/.bashrc`, `~/.zshrc` and a fish conf.d
+snippet when needed, marked with a comment so `./uninstall.sh` can take it back
+out; open a new terminal after installing.
+
 ## Making the camera usable in browsers and apps
 
 The kernel fix alone does not give you a webcam. The sensor reaches userspace only
@@ -141,7 +175,13 @@ sudo ./scripts/camera-bridge-setup.sh --persist   # /dev/video42 + /dev/video43
 mkdir -p ~/.config/systemd/user
 sed "s|%REPO%|$PWD|" "scripts/camera-bridge@.service" > ~/.config/systemd/user/camera-bridge@.service
 systemctl --user daemon-reload
-systemctl --user enable --now camera-bridge@front camera-bridge@back
+
+# Installed, not enabled: the cameras stay off until asked for.
+sed "s|%REPO%|$PWD|" bin/surface-camera > ~/.local/bin/surface-camera
+chmod +x ~/.local/bin/surface-camera
+ln -sf surface-camera ~/.local/bin/start-camera
+ln -sf surface-camera ~/.local/bin/stop-camera
+start-camera
 ```
 
 The unit sets `WorkingDirectory` to the repo and runs

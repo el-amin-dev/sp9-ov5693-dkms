@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # One-command setup for the Surface Pro 9 cameras on Ubuntu.
 #
+#   mkdir -p ~/projects && cd ~/projects
 #   git clone https://github.com/el-amin-dev/sp9-ov5693-dkms
 #   cd sp9-ov5693-dkms
 #   ./install.sh
+#
+# Keep the clone where it is: the user service points at this directory, so moving
+# or deleting it stops the cameras until ./install.sh is re-run.
 #
 #   ./install.sh --check   # report state, change nothing
 #   ./uninstall.sh         # undo it

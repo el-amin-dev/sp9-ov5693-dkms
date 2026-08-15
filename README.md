@@ -36,10 +36,16 @@ v6.19 `drivers/media/i2c/ov5693.c`:
 ## Getting started
 
 ```bash
+mkdir -p ~/projects && cd ~/projects
 git clone https://github.com/el-amin-dev/sp9-ov5693-dkms
 cd sp9-ov5693-dkms
 ./install.sh
 ```
+
+Keep the clone somewhere permanent — `~/projects` is the convention used here. The
+`camera-bridge@.service` unit points at wherever you cloned it, so moving or deleting
+the directory afterwards stops the cameras. If you do move it, re-run `./install.sh`
+to rewrite the unit's path.
 
 That is the whole thing. Run it as your **normal user** — it calls `sudo` itself for
 the steps that need root, and refuses to run as root because the services and the

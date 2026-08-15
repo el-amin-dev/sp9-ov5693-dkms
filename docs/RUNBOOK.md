@@ -69,8 +69,13 @@ What it asserts, per resolution:
 3. At ≥1296 px wide only: the frame is >1% non-zero bytes.
 
 Widths below 1296 px are captured and measured but not content-asserted: libcamera's
-software ISP hands back empty (all-zero) buffers for narrow streams, so a black
-1280x720 frame is a libcamera limitation, not a driver fault.
+software ISP is reported to hand back empty (all-zero) buffers for narrow streams, so
+a black 1280x720 frame is a libcamera limitation, not a driver fault.
+
+Observed here, though: capturing the **rear** camera (unaffected by this bug) at
+1280x720 returned 100% non-zero bytes, i.e. the narrow-width limitation did not
+reproduce on this setup. The threshold is kept as a non-fatal caveat rather than an
+assertion, so a black narrow frame is reported but never fails the run.
 
 Manual equivalent:
 

@@ -107,9 +107,15 @@ run_resolution() {
 		--file="${dir}/frame-#.raw" >"${logf}" 2>&1
 	rc=$?
 
-	# The negotiated size may differ from the requested one; report what we got.
-	local actual
-	actual="$(grep -oE '[0-9]{3,5}x[0-9]{3,5}' "${logf}" | head -1 || true)"
+	# libcamera may adjust the requested size. Read what was actually configured
+	# from cam's own "configuring streams" line -- anchored on that line because
+	# the log is full of unrelated resolutions (sensor array sizes in warnings).
+	local actual eff_width=${width}
+	actual="$(sed -n 's/.*configuring streams: ([0-9]*) \([0-9]*x[0-9]*\).*/\1/p' "${logf}" | head -1)"
+	if [[ -n ${actual} ]]; then
+		eff_width=${actual%x*}
+		[[ ${actual} == "${res}" ]] || warn "requested ${res}, libcamera configured ${actual}"
+	fi
 
 	if [[ ${rc} -eq 124 ]]; then
 		RESULTS+=("FAIL ${res}: cam still running after ${CAPTURE_TIMEOUT}s (the stream hang is not fixed)")
@@ -137,7 +143,8 @@ run_resolution() {
 	fi
 
 	pct="$(nonzero_pct "${biggest}")"
-	if [[ ${width} -ge ${SOFTISP_MIN_WIDTH} ]]; then
+	# Judge on the width actually streamed, not the one asked for.
+	if [[ ${eff_width} -ge ${SOFTISP_MIN_WIDTH} ]]; then
 		if awk -v p="${pct}" 'BEGIN { exit !(p > 1.0) }'; then
 			verdict="PASS ${res}: no timeouts, ${pct}% non-zero bytes"
 		else
@@ -149,7 +156,7 @@ run_resolution() {
 	fi
 	RESULTS+=("${verdict}")
 	ok "${verdict#* }"
-	[[ -n ${actual} ]] && ok "negotiated stream: ${actual}"
+	ok "negotiated stream: ${actual:-unknown}, $(find "${dir}" -name 'frame-*' -type f | wc -l) frame(s) written"
 	return 0
 }
 

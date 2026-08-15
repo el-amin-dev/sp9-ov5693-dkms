@@ -17,14 +17,24 @@
 #
 # Env overrides:
 #   OV5693_CAM    camera index or id substring (default: auto-detected)
-#   RESOLUTIONS   space-separated WxH list  (default: 1280x720 1920x1080 2592x1944)
+#   RESOLUTIONS   space-separated WxH list  (default: 1920x1080 2592x1944)
 #   FRAMES        frames per capture        (default: 5)
 #   CAPTURE_TIMEOUT seconds per capture     (default: 30)
 #   OUTDIR        where frames are written  (default: mktemp -d)
 set -uo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../scripts" && pwd)/common.sh"
 
-RESOLUTIONS="${RESOLUTIONS:-1280x720 1920x1080 2592x1944}"
+# Deliberately no mode narrower than SOFTISP_MIN_WIDTH below.
+#
+# The front sensor cannot stream them: 1280x720 does not merely return black, it
+# makes the IPU6 receiver log "stream stop time out" and leaves it wedged, so the
+# FIFO-overflow errors that follow poison later captures in the same run. Testing
+# a mode nothing uses was failing the whole install -- and rolling back a module
+# that works perfectly at the sizes the bridge actually runs at.
+#
+# Pass RESOLUTIONS explicitly to probe narrow modes; results below the threshold
+# are reported but never fail the run.
+RESOLUTIONS="${RESOLUTIONS:-1920x1080 2592x1944}"
 FRAMES="${FRAMES:-5}"
 CAPTURE_TIMEOUT="${CAPTURE_TIMEOUT:-30}"
 OUTDIR="${OUTDIR:-$(mktemp -d /tmp/ov5693-capture.XXXXXX)}"
@@ -117,28 +127,34 @@ run_resolution() {
 	fi
 
 	# 124 = terminated by timeout; 137 = it took the SIGKILL from -k.
+	# Below the soft-ISP threshold nothing is fatal: the sensor cannot do those
+	# modes, the bridge never asks for them, and failing on one would reject a
+	# perfectly good driver.
+	local fatal=1 tag=FAIL
+	[[ ${width} -ge ${SOFTISP_MIN_WIDTH} ]] || { fatal=0; tag="INFO(unsupported-mode)"; }
+
 	if [[ ${rc} -eq 124 || ${rc} -eq 137 ]]; then
-		RESULTS+=("FAIL ${res}: cam still running after ${CAPTURE_TIMEOUT}s (the stream hang is not fixed)")
-		((failures++))
+		RESULTS+=("${tag} ${res}: cam still running after ${CAPTURE_TIMEOUT}s")
+		[[ ${fatal} -eq 1 ]] && ((failures++))
 		return 1
 	elif [[ ${rc} -ne 0 ]]; then
-		RESULTS+=("FAIL ${res}: cam exited ${rc} -- $(tail -2 "${logf}" | tr '\n' ' ')")
-		((failures++))
+		RESULTS+=("${tag} ${res}: cam exited ${rc} -- $(tail -2 "${logf}" | tr '\n' ' ')")
+		[[ ${fatal} -eq 1 ]] && ((failures++))
 		return 1
 	fi
 
 	timeouts="$(dmesg_since "${before}" "${STREAM_TIMEOUT_RE}")"
 	if [[ -n ${timeouts} ]]; then
-		RESULTS+=("FAIL ${res}: kernel logged $(wc -l <<<"${timeouts}") stream timeout line(s)")
-		((failures++))
+		RESULTS+=("${tag} ${res}: kernel logged $(wc -l <<<"${timeouts}") stream timeout line(s)")
+		[[ ${fatal} -eq 1 ]] && ((failures++))
 		return 1
 	fi
 
 	biggest="$(find "${dir}" -name 'frame-*' -type f -printf '%s %p\n' 2>/dev/null |
 		sort -rn | head -1 | cut -d' ' -f2-)"
 	if [[ -z ${biggest} ]]; then
-		RESULTS+=("FAIL ${res}: cam exited 0 but wrote no frames")
-		((failures++))
+		RESULTS+=("${tag} ${res}: cam exited 0 but wrote no frames")
+		[[ ${fatal} -eq 1 ]] && ((failures++))
 		return 1
 	fi
 

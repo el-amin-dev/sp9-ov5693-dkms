@@ -132,6 +132,14 @@ if modinfo -F filename ov5693 2>/dev/null | grep -q updates/dkms; then
 else
 	need_sudo "install the ov5693 DKMS module"
 	sudo ./scripts/install-and-test.sh || die "ov5693 install failed -- see output above"
+	# Reloading ov5693 invalidates libcamera's camera objects, but WirePlumber goes
+	# on advertising the old nodes. They look present and healthy, so nothing
+	# retries -- and the first format request on one fails with EINVAL. Force a
+	# re-enumeration while we know the module has just changed underneath it.
+	log "Refreshing WirePlumber after the module reload"
+	systemctl --user restart wireplumber 2>/dev/null || true
+	sleep 5
+	ok "camera nodes re-enumerated"
 fi
 
 # --- 2. the loopback devices -------------------------------------------------
@@ -169,8 +177,13 @@ for cam in "${CAMERAS[@]}"; do
 	systemctl --user enable --now "camera-bridge@${cam}" ||
 		warn "could not start camera-bridge@${cam}"
 done
-sleep 4
+# Poll rather than sleep: a bridge may spend a while waiting for its camera node,
+# and a flat delay reported a still-starting service as failed.
 for cam in "${CAMERAS[@]}"; do
+	for _ in $(seq 1 30); do
+		systemctl --user is-active --quiet "camera-bridge@${cam}" && break
+		sleep 2
+	done
 	# One camera failing must not hide a working other one.
 	if systemctl --user is-active --quiet "camera-bridge@${cam}"; then
 		ok "bridge@${cam} running"

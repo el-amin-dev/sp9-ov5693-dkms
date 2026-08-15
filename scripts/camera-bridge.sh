@@ -151,11 +151,30 @@ resolve() {
 		die "no ${loc} camera in PipeWire after 120s (check: cam -l, systemctl --user status wireplumber)"
 }
 
+# A node can exist and still be dead: reloading the sensor module invalidates
+# libcamera's camera objects while WirePlumber keeps advertising the old nodes, and
+# the first format request then fails with "error set output format: -22". The
+# node-missing path never fires for that, so treat a pipeline that dies almost
+# immediately as the same stale-node symptom and re-enumerate once. Marker file,
+# not a variable: systemd restarts us as a fresh process each time.
+readonly NUDGE_MARKER=/tmp/camera-bridge-stale-nudge
+
+handle_early_exit() {
+	local loc=$1 elapsed=$2
+	[[ ${elapsed} -lt 15 ]] || { rm -f "${NUDGE_MARKER}.${loc}"; return; }
+	if [[ ! -e "${NUDGE_MARKER}.${loc}" ]]; then
+		: >"${NUDGE_MARKER}.${loc}"
+		log "pipeline died in ${elapsed}s; camera node looks stale, re-enumerating"
+		systemctl --user restart wireplumber 2>/dev/null || true
+		sleep 6
+	fi
+}
+
 run_pipeline() {
 	# videoflip before videoscale: at 180 the dimensions are unchanged either way,
 	# but rotating the smaller frame after scaling would cost less only for 90/270,
 	# where scaling first would also swap the output aspect.
-	exec gst-launch-1.0 \
+	gst-launch-1.0 \
 		pipewiresrc target-object="${SERIAL}" always-copy=true \
 		! "video/x-raw,width=${CAPTURE_W},height=${CAPTURE_H}" \
 		! videoconvert ! videoflip method="${FLIP}" ! videoscale \
@@ -171,7 +190,11 @@ run)
 	# Foreground: systemd supervises and restarts, so no pidfile is kept.
 	resolve "${loc}"
 	log "feeding ${DEV} from ${loc} camera (serial ${SERIAL}, rotate ${ROTATION}deg)"
+	started=${SECONDS}
 	run_pipeline
+	rc=$?
+	handle_early_exit "${loc}" $((SECONDS - started))
+	exit "${rc}"
 	;;
 start)
 	resolve "${loc}"

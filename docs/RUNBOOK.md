@@ -183,6 +183,28 @@ systemctl --user restart wireplumber
 systemctl --user restart camera-bridge@front camera-bridge@back
 ```
 
+### "error set output format: -22" right after installing
+
+A camera node can exist and still be dead. Reloading the sensor module -- which
+`install.sh` does -- destroys libcamera's camera objects, but WirePlumber goes on
+advertising the old nodes. They look present and healthy, so nothing retries, and
+the first format request on one fails:
+
+```
+pipewiresrc: stream error: error set output format: -22 (Invalid argument)
+ERROR: pipeline doesn't want to preroll.
+```
+
+Only the reloaded sensor is affected, which is why the back camera keeps working
+while the front does not. `install.sh` refreshes WirePlumber after the module step,
+and the bridge treats a pipeline that dies within 15s as the same symptom and
+re-enumerates once by itself. To force it:
+
+```bash
+systemctl --user restart wireplumber
+systemctl --user restart camera-bridge@front camera-bridge@back
+```
+
 ### "Device is not a output device"
 
 `exclusive_caps=1` means a loopback flips to capture-only once a consumer opens it,

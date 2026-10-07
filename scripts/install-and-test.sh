@@ -8,10 +8,12 @@
 #   header package or a source that no longer compiles changes nothing at all;
 #   after that an EXIT trap rolls the package back and confirms the stock in-tree
 #   module is loadable again before exiting non-zero.
-# The stock ov5693.ko is only ever shadowed, never modified or deleted.
+# The stock ov5693.ko is shadowed, never modified. Debian/Ubuntu DKMS leaves it in
+# place; Fedora's moves it into its own tree while ours is installed and puts it
+# back on removal ("Restoring archived original module").
 #
 # Touches: /usr/src/<pkg>-<ver>, /var/lib/dkms (dkms's own state) and
-# /lib/modules/<kver>/updates/dkms + modules.dep (unavoidable for any DKMS
+# /lib/modules/<kver>/{updates/dkms,extra} + modules.dep (unavoidable for any DKMS
 # install). Nothing in /boot, no bootloader config, no package manager, no reboot.
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
@@ -114,7 +116,7 @@ ok "$(dkms status -m "${PKG_NAME}" -v "${PKG_VERSION}")"
 # --- 5. load it -------------------------------------------------------------
 log "Reloading ${MODULE}"
 reload_module
-module_is_patched || die "modprobe still resolves to $(module_path) -- the DKMS module is not shadowing the stock one"
+module_is_patched || die "modprobe still resolves to $(module_path), which has no mipi_ctrl00 parameter -- the DKMS module is not shadowing the stock one"
 [[ -r "/sys/module/${MODULE}/parameters/mipi_ctrl00" ]] ||
 	die "patched module loaded but exposes no mipi_ctrl00 parameter"
 ok "patched module live: $(module_path)"

@@ -27,13 +27,22 @@ Roll back completely at any time:
 sudo ./scripts/uninstall.sh
 ```
 
-The stock in-tree `ov5693.ko` is never modified or deleted. DKMS installs to
-`/lib/modules/<kver>/updates/dkms/`, which `modprobe` searches before
-`kernel/drivers/`, so uninstalling is only ever "stop shadowing it".
+The stock in-tree `ov5693.ko` is never deleted. Where it goes depends on the
+distribution's DKMS:
+
+- **Debian/Ubuntu:** DKMS installs to `/lib/modules/<kver>/updates/dkms/`, which
+  `modprobe` searches before `kernel/drivers/`, and leaves the stock file where it is.
+- **Fedora and openSUSE:** DKMS ignores `DEST_MODULE_LOCATION`, installs to
+  `/lib/modules/<kver>/extra/`, and moves the stock file into its own tree while ours
+  is installed (`dkms status` says "Original modules exist"). `dkms remove` puts it
+  back ("Restoring archived original module").
+
+Either way uninstalling is only ever "stop shadowing it". The scripts recognise the
+patched module by its `mipi_ctrl00` parameter, not by its path.
 
 What the install touches outside this repo: `/usr/src/ov5693-surface-1.0.0`,
 DKMS's own state under `/var/lib/dkms`, and
-`/lib/modules/<kver>/updates/dkms` + `modules.dep` (unavoidable for any DKMS
+`/lib/modules/<kver>/updates/dkms` or `/extra` + `modules.dep` (unavoidable for any DKMS
 package). Nothing in `/boot`, no bootloader config, no package manager, no reboot.
 
 DKMS also generates a MOK signing keypair if one does not exist yet, and signs the
@@ -51,8 +60,11 @@ Nothing to run — this is a kernel module. It loads on boot once installed, and
 rebuilds it for every new kernel (`AUTOINSTALL="yes"`).
 
 ```bash
-# which ov5693.ko is in effect (expect .../updates/dkms/ov5693.ko* when installed)
+# which ov5693.ko is in effect (expect .../updates/dkms/ov5693.ko* on Debian/Ubuntu,
+# .../extra/ov5693.ko* on Fedora/openSUSE)
 modinfo -F filename ov5693
+# is it the patched one? (expect a mipi_ctrl00 line; the stock module has none)
+modinfo -F parm ov5693
 
 # current MIPI_CTRL00 value (45 == 0x2d)
 cat /sys/module/ov5693/parameters/mipi_ctrl00
@@ -540,7 +552,7 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 
 ```bash
 dkms status -m ov5693-surface                 # expect: ..., <kver>, x86_64: installed
-modinfo -F filename ov5693 | grep updates/dkms
+modinfo -F parm ov5693 | grep mipi_ctrl00   # the patched driver, wherever DKMS put it
 cat /sys/module/ov5693/parameters/mipi_ctrl00 # expect: 45
 ls /sys/bus/i2c/drivers/ov5693/               # expect an i2c-OVTI5693:00 style entry
 cam -l                                        # expect the front camera listed

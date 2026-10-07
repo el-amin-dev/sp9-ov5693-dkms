@@ -37,8 +37,11 @@ require_root() {
 # Absolute path of the ov5693.ko modprobe would load right now.
 module_path() { modinfo -F filename "${MODULE}" 2>/dev/null || true; }
 
-# True when the DKMS-built module (in updates/dkms) is the one in effect.
-module_is_patched() { [[ "$(module_path)" == *"/updates/dkms/"* ]]; }
+# True when the module modprobe would load is ours. Identified by the parameter
+# only the patched driver has, not by its path: DKMS installs to updates/dkms on
+# Debian/Ubuntu but to extra/ on Fedora and openSUSE, where DEST_MODULE_LOCATION
+# is ignored -- a path check there rejects a perfectly good install.
+module_is_patched() { modinfo -F parm "${MODULE}" 2>/dev/null | grep -q '^mipi_ctrl00:'; }
 
 # --- kernel log cursor ------------------------------------------------------
 # A line count is not a usable cursor into a ring buffer: once it wraps, dmesg

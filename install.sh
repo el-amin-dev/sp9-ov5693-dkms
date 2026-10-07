@@ -127,10 +127,15 @@ device_for() {
 	return 1
 }
 
+# Same test as module_is_patched in scripts/common.sh (which this script does not
+# source): only the patched driver has a mipi_ctrl00 parameter, wherever the
+# distro's DKMS chose to install it.
+patched_module_installed() { modinfo -F parm ov5693 2>/dev/null | grep -q '^mipi_ctrl00:'; }
+
 check() {
 	local i cam want dev
 	log "State"
-	if modinfo -F filename ov5693 2>/dev/null | grep -q updates/dkms; then
+	if patched_module_installed; then
 		ok "patched ov5693 active"
 		[[ -r /sys/module/ov5693/parameters/mipi_ctrl00 ]] &&
 			ok "mipi_ctrl00 = $(cat /sys/module/ov5693/parameters/mipi_ctrl00)"
@@ -226,7 +231,7 @@ ok "cameras: ${CAMERAS[*]}"
 
 # --- 1. the kernel module ----------------------------------------------------
 log "Step 1/4: patched ov5693 kernel module"
-if modinfo -F filename ov5693 2>/dev/null | grep -q updates/dkms; then
+if patched_module_installed; then
 	ok "already installed and active"
 else
 	need_sudo "install the ov5693 DKMS module"

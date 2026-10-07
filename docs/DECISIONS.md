@@ -39,6 +39,11 @@ Entry format (use exactly this shape):
   `tests/test_pkg.py` pin them against os-release fixtures. Only Ubuntu has been
   run end to end on hardware so far; the other families are verified by dry run. pacman cannot dry-run a conflict, so it
   relies on `--noconfirm` answering pacman's removal prompt with its default "no".
+  ADR-001's `updates/dkms` path turned out to be Debian-only. Fedora's DKMS ignores
+  `DEST_MODULE_LOCATION`, installs to `extra/` and archives the in-tree file until
+  removal. The first Fedora install therefore rolled itself back over a path check.
+  The patched module is now identified by its `mipi_ctrl00` parameter
+  (`modinfo -F parm`), which no distro layout can change.
 
 ## ADR-005 — Stream on demand by parking the pipeline in PAUSED (2026-08-15)
 - status: accepted, implemented, shipped DISABLED — the mechanism does not work in

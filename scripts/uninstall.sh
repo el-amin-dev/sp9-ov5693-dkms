@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Revert to the stock in-tree ov5693 module.
 #
-# The stock ov5693.ko is never modified or deleted by this package -- it is only
-# shadowed by the DKMS copy in updates/dkms -- so removing that copy and running
-# depmod is the whole rollback.
+# The stock ov5693.ko is only shadowed by the DKMS copy (updates/dkms on
+# Debian/Ubuntu, extra/ on Fedora, where DKMS also archives the stock file and
+# restores it on removal), so `dkms remove` plus depmod is the whole rollback.
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
 require_root

@@ -8,7 +8,8 @@ apps.
 Developed on a Surface Pro 9 running Ubuntu 26.04 with the
 [linux-surface](https://github.com/linux-surface/linux-surface) kernel. Nothing here is
 model-specific: it applies to any Surface pairing an OmniVision OV5693 with an Intel
-IPU6.
+IPU6. The installer is not Ubuntu-specific either: it drives `apt`, `dnf`, `pacman` or
+`zypper`, whichever your distribution uses (see [What it installs](#what-it-installs)).
 
 ## Do these symptoms match?
 
@@ -170,17 +171,68 @@ browser flags to set.
 
 ### What it installs
 
-Packages, via apt (the installer aborts if apt would *remove* anything):
+Packages, via the distribution's own package manager. The family is read from
+`/etc/os-release` (`ID`, then `ID_LIKE`), so derivatives land on their parent:
 
-| Package | Why |
-|---|---|
-| `dkms`, `build-essential`, `linux-headers-$(uname -r)` | build the two out-of-tree modules |
-| `v4l2loopback-dkms`, `v4l2loopback-utils` | the virtual webcam devices |
-| `gstreamer1.0-tools`, `-plugins-base`, `-plugins-good`, `-pipewire` | `pipewiresrc`, `videoconvert`/`videoscale`, `v4l2sink` |
-| `v4l-utils` | `v4l2-ctl`, to find and inspect the devices |
-| `pipewire-bin` | `pw-dump`, to locate the camera nodes |
-| `libcamera-tools` | `cam`, used by the test scripts |
-| `python3` | the `surfacecam` package — the bridge itself, and the camera facts `install.sh` reads back from it |
+- Debian, Ubuntu, Mint, Pop!_OS → `apt`
+- Fedora, RHEL, Alma, Rocky → `dnf`
+- Arch, Manjaro, EndeavourOS → `pacman`
+- openSUSE Tumbleweed / Leap → `zypper`
+
+Before installing anything the installer does a dry run, and refuses outright if the
+package manager would *remove* a package to satisfy the request. Pulling in the wrong
+package can take a desktop with it, so that is a hard stop rather than a prompt.
+
+| Need | apt | dnf | pacman | zypper |
+|---|---|---|---|---|
+| build the out-of-tree modules | `dkms`, `build-essential` | `dkms`, `make`, `gcc` | `dkms`, `base-devel` | `dkms`, `make`, `gcc` |
+| headers for the running kernel | `linux-headers-$(uname -r)` | `kernel-devel-$(uname -r)` ¹ | `linux-headers` ¹ | `kernel-default-devel` ² |
+| the virtual webcam devices | `v4l2loopback-dkms`, `v4l2loopback-utils` | `akmod-v4l2loopback`, `v4l2loopback` ³ | `v4l2loopback-dkms`, `v4l2loopback-utils` | `v4l2loopback-kmp-default`, `v4l2loopback-utils` ² |
+| the `surfacecam` package and its GStreamer bindings | `python3`, `python3-gi`, `gir1.2-gstreamer-1.0` | `python3`, `python3-gobject` | `python`, `python-gobject` | `python3`, `python3-gobject`, `typelib-1_0-Gst-1_0` |
+| `pipewiresrc`, `videoconvert`/`videoscale`, `v4l2sink` | `gstreamer1.0-tools`, `-plugins-base`, `-plugins-good`, `gstreamer1.0-pipewire` | `gstreamer1`, `-plugins-base`, `-plugins-good`, `pipewire-gstreamer` | `gstreamer`, `gst-plugins-base`, `gst-plugins-good`, `gst-plugin-pipewire` | `gstreamer`, `-plugins-base`, `-plugins-good`, `gstreamer-plugin-pipewire` |
+| `pw-dump`, to locate the camera nodes | `pipewire-bin` | `pipewire-utils` | `pipewire` | `pipewire-tools` |
+| `v4l2-ctl`, to find and inspect the devices | `v4l-utils` | `v4l-utils` | `v4l-utils` | `v4l-utils` |
+| `fuser`, how the bridge sees who has a camera open | `psmisc` | `psmisc` | `psmisc` | `psmisc` |
+| `cam`, used by the test scripts | `libcamera-tools` | `libcamera-tools` | `libcamera-tools` | `libcamera-cam` |
+
+¹ Named after the package that owns the running kernel: `kernel-surface` gets
+`kernel-surface-devel`, `linux-surface` gets `linux-surface-headers`, `linux-lts`
+gets `linux-lts-headers`, and so on.
+² The suffix follows the running kernel's flavour (`default`, `longterm`, `rt`, ...).
+³ From RPM Fusion; see below.
+
+**Fedora** carries v4l2loopback only in [RPM Fusion](https://rpmfusion.org) (free).
+If it is not enabled the installer stops and prints the command to enable it — it
+never adds a third-party repository on its own, because that is your decision to make:
+
+```bash
+sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
+```
+
+`akmod-v4l2loopback` normally builds its module in the background at the next boot;
+the installer runs `akmods` for the running kernel straight away so the devices can be
+created without a reboot.
+
+**RHEL, Alma and Rocky** additionally need [EPEL](https://docs.fedoraproject.org/en-US/epel/)
+(for `dkms`) and the EL flavour of RPM Fusion. libcamera's `cam` may be missing or old
+there; only the test scripts use it, so the cameras work without it.
+
+**openSUSE** installs the v4l2loopback KMP built for your kernel flavour, the same way
+it picks the headers.
+
+To see what your system would get, without changing anything:
+
+```bash
+./install.sh --print-deps                  # this machine's family and package names
+PKG_FAMILY=pacman ./install.sh --print-deps  # any other family's
+```
+
+**Other distributions** (Gentoo, Void, NixOS, ...) are not detected: the installer lists
+what it needs and stops. Install the equivalents by hand, then skip the package step:
+
+```bash
+PKG_FAMILY=none ./install.sh
+```
 
 Outside the repo it creates only these, all removed by `./uninstall.sh`:
 
@@ -193,6 +245,9 @@ It never touches `/boot`, the bootloader, or any kernel package, and never needs
 
 - a Surface with an OV5693 front camera behind an Intel IPU6 (developed on the Pro 9)
 - a kernel with the linux-surface camera patches (`linux-surface` 6.19 or newer)
+  is recommended. Whatever kernel you run, the installer asks the package manager which
+  package owns it and installs that package's headers, so a `linux-surface`, `-lts` or
+  `-zen` kernel gets matching headers rather than the stock ones
 - Secure Boot **off**, or the DKMS modules signed with an enrolled MOK key
 
 Just the kernel module, without the userspace plumbing:
@@ -224,8 +279,9 @@ reasoning and measurements are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 ## The bridge
 
 The republishing is done by `surfacecam/`, a Python package that needs nothing beyond
-the standard library and the PyGObject GStreamer bindings (`python3-gi`,
-`gir1.2-gstreamer-1.0` — already present on an Ubuntu desktop). One user service per
+the standard library and the PyGObject GStreamer bindings (`python3-gi` and
+`gir1.2-gstreamer-1.0` on Debian/Ubuntu, `python3-gobject` on Fedora — usually
+already present on a GNOME desktop, and installed by `install.sh` if not). One user service per
 camera runs `python3 -m surfacecam.cli run <front|back>`.
 
 | Module | Responsibility |

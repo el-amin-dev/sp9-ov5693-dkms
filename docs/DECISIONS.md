@@ -16,6 +16,30 @@ Entry format (use exactly this shape):
 
 <!-- append ADRs below, newest first -->
 
+## ADR-006 — Support four package-manager families, behind one fail-closed guard (2026-10-07)
+- status: accepted
+- context: `install.sh` called `apt-get` and `dpkg` directly, so on Fedora it died at
+  step 0 with `sudo: apt-get: command not found`. Nothing past step 0 depends on the
+  distro: DKMS, modprobe, systemd user units and the bridge are the same everywhere.
+- decision: `scripts/pkg.sh` detects apt / dnf / pacman / zypper from os-release
+  (`ID`, then `ID_LIKE`), maps each logical need to that family's package names, and
+  keeps the old safety rule for every family: a dry run first, and refuse if it would
+  remove anything. The parsers match English output, so dry runs are forced into
+  the C locale. Output they do not recognise counts as failure, never as "0
+  removals". Headers are named after the package that owns the running kernel, so
+  linux-surface, -lts and -zen kernels get their own. On Fedora, v4l2loopback comes
+  from RPM Fusion's akmod. The installer stops and prints the command to enable RPM
+  Fusion, and never adds a third-party repository itself. Other distros install by
+  hand and run `PKG_FAMILY=none ./install.sh`.
+- alternatives: building v4l2loopback from source via DKMS on every distro (one
+  code path, but we would own pinning and security updates for a kernel module);
+  supporting only apt + dnf (smaller, but Arch and openSUSE are common on Surface
+  devices thanks to linux-surface).
+- consequences: four sets of package names to keep correct. `--print-deps` and
+  `tests/test_pkg.py` pin them against os-release fixtures. Only Ubuntu has been
+  run end to end on hardware so far; the other families are verified by dry run. pacman cannot dry-run a conflict, so it
+  relies on `--noconfirm` answering pacman's removal prompt with its default "no".
+
 ## ADR-005 — Stream on demand by parking the pipeline in PAUSED (2026-08-15)
 - status: accepted, implemented, shipped DISABLED — the mechanism does not work in
   practice (see consequences). The code remains behind `config.ON_DEMAND`, which is

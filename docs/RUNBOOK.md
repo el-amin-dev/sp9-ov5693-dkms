@@ -612,8 +612,10 @@ re-run `./install.sh`; it now detects the package manager from `/etc/os-release`
 `./install.sh --print-deps` shows which family it picked. On a distribution it does not
 recognise, install the packages by hand and run `PKG_FAMILY=none ./install.sh`.
 
-**`<family> cannot resolve: ... (missing repository? see README)`.** The dry run could
-not find one of the packages. On Fedora that is almost always v4l2loopback without
+**`<family> cannot resolve: ...`.** The dry run could not find one of the packages.
+It can also mean the package database is stale, or that the running kernel is older
+than the newest installed one, so its headers are gone from the repositories; reboot
+into the newest kernel and re-run. On Fedora that is almost always v4l2loopback without
 RPM Fusion; on RHEL, Alma or Rocky it is `dkms` without EPEL, or v4l2loopback without
 RPM Fusion for EL. Enable the missing repository, then re-run:
 
@@ -625,6 +627,28 @@ sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-releas
 On RHEL-family systems use the `el` release package from <https://rpmfusion.org>
 after `sudo dnf install epel-release` (Alma, Rocky; RHEL itself needs the EPEL release
 RPM from the Fedora project).
+
+**Fedora: no cameras at all, `cam -l` lists none.** Check `uname -r` first. Without
+`.surface.` in it, the machine booted a stock Fedora kernel. That kernel cannot power
+the sensors: the kernel log shows `int3472-discrete: GPIO type 0x08 unknown`, then
+`ov13858 ... failed with error -5` for the rear camera, and the front one never binds.
+`./install.sh --check` reports the patched ov5693 as not active, because DKMS built it
+only for the kernel that was running at install time.
+
+This is the usual result of a kernel update. Fedora's `/etc/sysconfig/kernel` ships
+`UPDATEDEFAULT=yes` with `DEFAULTKERNEL=kernel-core`, so every stock kernel update
+makes itself the default boot entry, above an installed linux-surface kernel. Make
+linux-surface the default once, and make it the kernel type new installs default to:
+
+```bash
+sudo grubby --set-default "$(ls -v /boot/vmlinuz-*.surface.* | tail -1)"
+sudo sed -i 's/^DEFAULTKERNEL=.*/DEFAULTKERNEL=kernel-surface-core/' /etc/sysconfig/kernel
+sudo grubby --default-kernel                 # expect a .surface. kernel
+```
+
+Reboot, then `./install.sh --check`. DKMS and akmods build both modules for the
+surface kernel automatically on its first boot; if `--check` still reports them
+missing, re-run `./install.sh`.
 
 **Wrong camera picked by the test.** `cam -l`, then
 `sudo OV5693_CAM=<index> ./tests/test-capture.sh`.

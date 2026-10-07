@@ -36,8 +36,10 @@ Entry format (use exactly this shape):
   supporting only apt + dnf (smaller, but Arch and openSUSE are common on Surface
   devices thanks to linux-surface).
 - consequences: four sets of package names to keep correct. `--print-deps` and
-  `tests/test_pkg.py` pin them against os-release fixtures. Only Ubuntu has been
-  run end to end on hardware so far; the other families are verified by dry run. pacman cannot dry-run a conflict, so it
+  `tests/test_pkg.py` pin them against os-release fixtures. Ubuntu 26.04 and Fedora
+  44 (linux-surface 6.19.8 kernel) have been run end to end on a Surface Pro 9,
+  capture tests included; Arch and openSUSE are verified by dry run and package
+  lists only. pacman cannot dry-run a conflict, so it
   relies on `--noconfirm` answering pacman's removal prompt with its default "no".
   ADR-001's `updates/dkms` path turned out to be Debian-only. Fedora's DKMS ignores
   `DEST_MODULE_LOCATION`, installs to `extra/` and archives the in-tree file until

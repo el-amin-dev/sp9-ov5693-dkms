@@ -641,7 +641,7 @@ makes itself the default boot entry, above an installed linux-surface kernel. Ma
 linux-surface the default once, and make it the kernel type new installs default to:
 
 ```bash
-sudo grubby --set-default "$(ls -v /boot/vmlinuz-*.surface.* | tail -1)"
+sudo grubby --set-default "$(printf '%s\n' /boot/vmlinuz-*.surface.* | sort -V | tail -1)"
 sudo sed -i 's/^DEFAULTKERNEL=.*/DEFAULTKERNEL=kernel-surface-core/' /etc/sysconfig/kernel
 sudo grubby --default-kernel                 # expect a .surface. kernel
 ```

@@ -1,14 +1,22 @@
 # Surface Pro 9 camera fix for Linux (OV5693 + Intel IPU6)
 
-**Working front and rear cameras on a Surface Pro 9 under Linux — in Chrome, Firefox,
-Zoom, Teams, Google Meet and GNOME Snapshot.** Patched `ov5693` sensor driver packaged
-for DKMS, plus the userspace bridge that makes the cameras actually usable by ordinary
-apps.
+**Surface Pro 9 camera not working on Linux? This fixes it.** It gets the front and rear
+webcams working in Chrome, Firefox, Zoom, Microsoft Teams, Google Meet and GNOME
+Snapshot, on **Ubuntu, Fedora, Arch, openSUSE** and their derivatives (Linux Mint,
+Pop!_OS, Manjaro, EndeavourOS, ...). One command installs a patched `ov5693` sensor
+driver through DKMS, plus the bridge that makes the camera visible to ordinary apps.
 
-Developed on a Surface Pro 9 running Ubuntu 26.04 with the
-[linux-surface](https://github.com/linux-surface/linux-surface) kernel. Nothing here is
-model-specific: it applies to any Surface pairing an OmniVision OV5693 with an Intel
-IPU6.
+![Front camera of a Surface Pro 9 working on Fedora Linux, live in GNOME Snapshot](docs/images/surface-pro-9-linux-camera-working.jpg)
+
+<sub>The front camera live in GNOME Snapshot on a Surface Pro 9: Fedora 44, linux-surface
+kernel 6.19.8, after `./install.sh` and `start-camera`.</sub>
+
+Developed on a Surface Pro 9 with the
+[linux-surface](https://github.com/linux-surface/linux-surface) kernel, and tested end
+to end on Ubuntu 26.04 and Fedora 44. Nothing here is model-specific: it applies to any
+Surface pairing an OmniVision OV5693 with an Intel IPU6. The installer uses `apt`, `dnf`,
+`pacman` or `zypper`, whichever your distribution has (see
+[What it installs](#what-it-installs)).
 
 ## Do these symptoms match?
 
@@ -105,9 +113,12 @@ use the bridge alone.
 
 ## Status
 
-- verified on: Surface Pro 9, Ubuntu 26.04, kernel 6.19.8-surface-3
+- verified on a Surface Pro 9 with:
+  - Ubuntu 26.04, kernel `6.19.8-surface-3`
+  - Fedora 44, kernel `6.19.8-3.surface.fc43`
+- Arch and openSUSE: package lists and installer dry runs verified, not yet run on hardware
 - front and rear cameras both working, surviving reboots
-- 39 unit tests, no hardware and no pytest required
+- 82 unit tests, no hardware and no pytest required
 
 ## Installing in detail
 
@@ -170,17 +181,68 @@ browser flags to set.
 
 ### What it installs
 
-Packages, via apt (the installer aborts if apt would *remove* anything):
+Packages, via the distribution's own package manager. The family is read from
+`/etc/os-release` (`ID`, then `ID_LIKE`), so derivatives land on their parent:
 
-| Package | Why |
-|---|---|
-| `dkms`, `build-essential`, `linux-headers-$(uname -r)` | build the two out-of-tree modules |
-| `v4l2loopback-dkms`, `v4l2loopback-utils` | the virtual webcam devices |
-| `gstreamer1.0-tools`, `-plugins-base`, `-plugins-good`, `-pipewire` | `pipewiresrc`, `videoconvert`/`videoscale`, `v4l2sink` |
-| `v4l-utils` | `v4l2-ctl`, to find and inspect the devices |
-| `pipewire-bin` | `pw-dump`, to locate the camera nodes |
-| `libcamera-tools` | `cam`, used by the test scripts |
-| `python3` | the `surfacecam` package — the bridge itself, and the camera facts `install.sh` reads back from it |
+- Debian, Ubuntu, Mint, Pop!_OS → `apt`
+- Fedora, RHEL, Alma, Rocky → `dnf`
+- Arch, Manjaro, EndeavourOS → `pacman`
+- openSUSE Tumbleweed / Leap → `zypper`
+
+Before installing anything the installer does a dry run, and refuses outright if the
+package manager would *remove* a package to satisfy the request. Pulling in the wrong
+package can take a desktop with it, so that is a hard stop rather than a prompt.
+
+| Need | apt | dnf | pacman | zypper |
+|---|---|---|---|---|
+| build the out-of-tree modules | `dkms`, `build-essential` | `dkms`, `make`, `gcc` | `dkms`, `base-devel` | `dkms`, `make`, `gcc` |
+| headers for the running kernel | `linux-headers-$(uname -r)` | `kernel-devel-$(uname -r)` ¹ | `linux-headers` ¹ | `kernel-default-devel` ² |
+| the virtual webcam devices | `v4l2loopback-dkms`, `v4l2loopback-utils` | `akmod-v4l2loopback`, `v4l2loopback` ³ | `v4l2loopback-dkms`, `v4l2loopback-utils` | `v4l2loopback-kmp-default`, `v4l2loopback-utils` ² |
+| the `surfacecam` package and its GStreamer bindings | `python3`, `python3-gi`, `gir1.2-gstreamer-1.0` | `python3`, `python3-gobject` | `python`, `python-gobject` | `python3`, `python3-gobject`, `typelib-1_0-Gst-1_0` |
+| `pipewiresrc`, `videoconvert`/`videoscale`, `v4l2sink` | `gstreamer1.0-tools`, `-plugins-base`, `-plugins-good`, `gstreamer1.0-pipewire` | `gstreamer1`, `-plugins-base`, `-plugins-good`, `pipewire-gstreamer` | `gstreamer`, `gst-plugins-base`, `gst-plugins-good`, `gst-plugin-pipewire` | `gstreamer`, `-plugins-base`, `-plugins-good`, `gstreamer-plugin-pipewire` |
+| `pw-dump`, to locate the camera nodes | `pipewire-bin` | `pipewire-utils` | `pipewire` | `pipewire-tools` |
+| `v4l2-ctl`, to find and inspect the devices | `v4l-utils` | `v4l-utils` | `v4l-utils` | `v4l-utils` |
+| `fuser`, how the bridge sees who has a camera open | `psmisc` | `psmisc` | `psmisc` | `psmisc` |
+| `cam`, used by the test scripts | `libcamera-tools` | `libcamera-tools` | `libcamera-tools` | `libcamera-cam` |
+
+¹ Named after the package that owns the running kernel: `kernel-surface` gets
+`kernel-surface-devel`, `linux-surface` gets `linux-surface-headers`, `linux-lts`
+gets `linux-lts-headers`, and so on.
+² The suffix follows the running kernel's flavour (`default`, `longterm`, `rt`, ...).
+³ From RPM Fusion; see below.
+
+**Fedora** carries v4l2loopback only in [RPM Fusion](https://rpmfusion.org) (free).
+If it is not enabled the installer stops and prints the command to enable it — it
+never adds a third-party repository on its own, because that is your decision to make:
+
+```bash
+sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
+```
+
+`akmod-v4l2loopback` normally builds its module in the background at the next boot;
+the installer runs `akmods` for the running kernel straight away so the devices can be
+created without a reboot.
+
+**RHEL, Alma and Rocky** additionally need [EPEL](https://docs.fedoraproject.org/en-US/epel/)
+(for `dkms`) and the EL flavour of RPM Fusion. libcamera's `cam` may be missing or old
+there; only the test scripts use it, so the cameras work without it.
+
+**openSUSE** installs the v4l2loopback KMP built for your kernel flavour, the same way
+it picks the headers.
+
+To see what your system would get, without changing anything:
+
+```bash
+./install.sh --print-deps                  # this machine's family and package names
+PKG_FAMILY=pacman ./install.sh --print-deps  # any other family's
+```
+
+**Other distributions** (Gentoo, Void, NixOS, ...) are not detected: the installer lists
+what it needs and stops. Install the equivalents by hand, then skip the package step:
+
+```bash
+PKG_FAMILY=none ./install.sh
+```
 
 Outside the repo it creates only these, all removed by `./uninstall.sh`:
 
@@ -193,6 +255,9 @@ It never touches `/boot`, the bootloader, or any kernel package, and never needs
 
 - a Surface with an OV5693 front camera behind an Intel IPU6 (developed on the Pro 9)
 - a kernel with the linux-surface camera patches (`linux-surface` 6.19 or newer)
+  is recommended. Whatever kernel you run, the installer asks the package manager which
+  package owns it and installs that package's headers, so a `linux-surface`, `-lts` or
+  `-zen` kernel gets matching headers rather than the stock ones
 - Secure Boot **off**, or the DKMS modules signed with an enrolled MOK key
 
 Just the kernel module, without the userspace plumbing:
@@ -224,8 +289,9 @@ reasoning and measurements are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 ## The bridge
 
 The republishing is done by `surfacecam/`, a Python package that needs nothing beyond
-the standard library and the PyGObject GStreamer bindings (`python3-gi`,
-`gir1.2-gstreamer-1.0` — already present on an Ubuntu desktop). One user service per
+the standard library and the PyGObject GStreamer bindings (`python3-gi` and
+`gir1.2-gstreamer-1.0` on Debian/Ubuntu, `python3-gobject` on Fedora — usually
+already present on a GNOME desktop, and installed by `install.sh` if not). One user service per
 camera runs `python3 -m surfacecam.cli run <front|back>`.
 
 | Module | Responsibility |
@@ -282,14 +348,81 @@ Unit tests, standard library only — no pytest, no camera, no root:
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-39 tests over camera identification against a recorded `pw-dump` (including a
-regression test for the back camera vanishing when libcamera reported no
-`api.libcamera.location`), the WirePlumber nudge guards, the pipeline description,
-and the on-demand policy — which is tested but not enabled, see above.
+82 tests, covering:
+
+- camera identification against a recorded `pw-dump`, including a regression test
+  for the back camera vanishing when libcamera reported no `api.libcamera.location`
+- the WirePlumber nudge guards
+- the pipeline description
+- the on-demand policy, which is tested but not enabled (see above)
+- distribution detection against 11 `os-release` files, and each family's package
+  names
+- the dry-run parsers behind the installer's never-remove rule, including non-English
+  and unrecognised output
 
 The hardware tests — capture, rollback, and the browser probe — need the camera and,
 for `dmesg`, root. See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for those and for the rest
 of the setup, run, and debug commands.
+
+## FAQ
+
+### Why does the Surface Pro 9 camera not work on Linux?
+
+The sensor driver in the mainline kernel never programs one register (`MIPI_CTRL00`),
+so the Intel IPU6 never receives a frame and every capture hangs. Even with that fixed,
+the camera is only exposed through libcamera and PipeWire, which Chrome, Firefox, Zoom
+and Teams do not use. Both are explained in
+[What was actually wrong](#what-was-actually-wrong); this repo fixes both.
+
+### Which Linux distributions does this work on?
+
+Anything based on Debian/Ubuntu, Fedora/RHEL, Arch or openSUSE: Ubuntu, Kubuntu,
+Linux Mint, Pop!_OS, Debian, Fedora, Alma, Rocky, Arch, Manjaro, EndeavourOS, openSUSE
+Tumbleweed and Leap. On other distributions, install the packages by hand and run
+`PKG_FAMILY=none ./install.sh` (see [What it installs](#what-it-installs)).
+
+### Do I need the linux-surface kernel?
+
+Yes. A stock distribution kernel cannot power the Surface camera sensors. On stock
+Fedora the kernel log shows `int3472-discrete: GPIO type 0x08 unknown`, the rear
+`ov13858` fails with `error -5`, and `cam -l` lists no cameras. Install
+[linux-surface](https://github.com/linux-surface/linux-surface/wiki/Installation-and-Setup),
+boot it, check that `uname -r` contains `surface`, then run `./install.sh`. On Fedora,
+make sure kernel updates do not switch you back to the stock kernel; see the
+troubleshooting notes in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
+### Does it work on the Surface Pro 8, Pro 10 or Surface Laptop?
+
+Only the Pro 9 has been tested. The fix applies to any Surface whose front camera is an
+OV5693 behind an Intel IPU6. To check yours:
+
+```bash
+ls /sys/bus/i2c/devices/ | grep OVTI5693    # the front sensor
+lsmod | grep intel_ipu6                     # the IPU6 driver
+```
+
+If both print something, it is worth trying: the installer verifies the result with a
+real capture, and rolls the kernel module back on its own if that fails.
+
+### The camera picture is black, or upside down
+
+Both are known and handled. Below about 1296px wide the sensor returns black frames,
+so the bridge always captures at 1920x1080 and serves 1280x720. The rear sensor is
+mounted upside down, so the bridge rotates it. If you still see either one, run
+`surface-camera status` and see [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
+### Is it safe to install? How do I remove it?
+
+The stock driver is shadowed, never deleted, and `./uninstall.sh --all` puts
+everything back. The kernel module install compiles and tests the module before
+installing it, and rolls back on any failure. The package step refuses to run if your
+package manager would remove anything. The installer never edits `/boot` or your
+bootloader.
+
+### Does it work with Secure Boot?
+
+Only if the DKMS modules are signed with a key enrolled in MOK. The simplest route is
+to turn Secure Boot off; the installer warns you if it is on.
 
 ## Documentation
 

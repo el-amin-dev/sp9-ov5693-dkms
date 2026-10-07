@@ -10,8 +10,9 @@ driver or the scripts is model-specific.
 
 ## Setup
 
-Requirements: `dkms`, `build-essential`, kernel headers for the running kernel,
-`libcamera-tools` (for `cam`). Secure Boot must be off **or** the DKMS module must be
+Requirements: `dkms`, a C compiler and `make`, kernel headers for the running kernel,
+libcamera's `cam` (for the capture tests). `./install.sh --print-deps` names the
+packages for this distribution. Secure Boot must be off **or** the DKMS module must be
 signed with an enrolled MOK key — the installer refuses to continue if signature
 enforcement is on.
 
@@ -26,18 +27,30 @@ Roll back completely at any time:
 sudo ./scripts/uninstall.sh
 ```
 
-The stock in-tree `ov5693.ko` is never modified or deleted. DKMS installs to
-`/lib/modules/<kver>/updates/dkms/`, which `modprobe` searches before
-`kernel/drivers/`, so uninstalling is only ever "stop shadowing it".
+The stock in-tree `ov5693.ko` is never deleted. Where it goes depends on the
+distribution's DKMS:
+
+- **Debian/Ubuntu:** DKMS installs to `/lib/modules/<kver>/updates/dkms/`, which
+  `modprobe` searches before `kernel/drivers/`, and leaves the stock file where it is.
+- **Fedora and openSUSE:** DKMS ignores `DEST_MODULE_LOCATION`, installs to
+  `/lib/modules/<kver>/extra/`, and moves the stock file into its own tree while ours
+  is installed (`dkms status` says "Original modules exist"). `dkms remove` puts it
+  back ("Restoring archived original module").
+
+Either way uninstalling is only ever "stop shadowing it". The scripts recognise the
+patched module by its `mipi_ctrl00` parameter, not by its path.
 
 What the install touches outside this repo: `/usr/src/ov5693-surface-1.0.0`,
 DKMS's own state under `/var/lib/dkms`, and
-`/lib/modules/<kver>/updates/dkms` + `modules.dep` (unavoidable for any DKMS
+`/lib/modules/<kver>/updates/dkms` or `/extra` + `modules.dep` (unavoidable for any DKMS
 package). Nothing in `/boot`, no bootloader config, no package manager, no reboot.
 
-On Ubuntu, DKMS also generates a MOK signing keypair under
-`/var/lib/shim-signed/mok/` if one does not exist yet, and signs the module with
-it. That is stock DKMS behaviour: the key is **not** enrolled (enrolling needs
+DKMS also generates a MOK signing keypair if one does not exist yet, and signs the
+module with it. Where it lives depends on the distribution's DKMS configuration
+(`mok_signing_key` / `mok_certificate` in `/etc/dkms/framework.conf`): Debian and
+Ubuntu put it under `/var/lib/shim-signed/mok/`; upstream DKMS, as shipped by Fedora,
+Arch and openSUSE, defaults to `/var/lib/dkms/mok.key` and `/var/lib/dkms/mok.pub`.
+Either way it is stock DKMS behaviour: the key is **not** enrolled (enrolling needs
 `mokutil --import` plus a reboot), and with Secure Boot off the signature is
 simply ignored.
 
@@ -47,8 +60,11 @@ Nothing to run — this is a kernel module. It loads on boot once installed, and
 rebuilds it for every new kernel (`AUTOINSTALL="yes"`).
 
 ```bash
-# which ov5693.ko is in effect (expect .../updates/dkms/ov5693.ko* when installed)
+# which ov5693.ko is in effect (expect .../updates/dkms/ov5693.ko* on Debian/Ubuntu,
+# .../extra/ov5693.ko* on Fedora/openSUSE)
 modinfo -F filename ov5693
+# is it the patched one? (expect a mipi_ctrl00 line; the stock module has none)
+modinfo -F parm ov5693
 
 # current MIPI_CTRL00 value (45 == 0x2d)
 cat /sys/module/ov5693/parameters/mipi_ctrl00
@@ -199,9 +215,22 @@ The bridge is the `surfacecam/` Python package: `config.py` (all camera facts),
 Manually, if you prefer the steps:
 
 ```bash
-sudo apt-get install -y v4l2loopback-dkms v4l2loopback-utils v4l-utils \
+./install.sh --print-deps   # this distribution's package names: deps, headers, loopback
+
+# Ubuntu / Debian
+sudo apt-get install -y dkms build-essential "linux-headers-$(uname -r)" \
+    python3 python3-gi gir1.2-gstreamer-1.0 \
     gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-    gstreamer1.0-pipewire pipewire-bin libcamera-tools python3
+    gstreamer1.0-pipewire pipewire-bin v4l-utils psmisc libcamera-tools \
+    v4l2loopback-dkms v4l2loopback-utils
+# Fedora (RPM Fusion free enabled; use the headers name --print-deps gives you)
+sudo dnf install -y dkms make gcc "kernel-devel-$(uname -r)" \
+    python3 python3-gobject \
+    gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good \
+    pipewire-gstreamer pipewire-utils v4l-utils psmisc libcamera-tools \
+    akmod-v4l2loopback v4l2loopback
+sudo akmods --force --kernels "$(uname -r)"       # build v4l2loopback now, not at next boot
+
 sudo ./scripts/camera-bridge-setup.sh --persist   # /dev/video42 + /dev/video43
 
 mkdir -p ~/.config/systemd/user
@@ -473,7 +502,10 @@ for. Do not "simplify" the bridge by capturing at the output size.
 systemctl --user disable --now camera-bridge@front camera-bridge@back
 rm ~/.config/systemd/user/camera-bridge@.service && systemctl --user daemon-reload
 sudo ./scripts/camera-bridge-setup.sh --undo      # unload module, remove /etc files
-sudo apt-get remove v4l2loopback-dkms v4l2loopback-utils   # optional
+# optional: the loopback packages (./uninstall.sh --all does this, and more, for you)
+sudo apt-get remove v4l2loopback-dkms v4l2loopback-utils                     # Ubuntu / Debian
+sudo dnf remove --setopt=clean_requirements_on_remove=False \
+    akmod-v4l2loopback v4l2loopback 'kmod-v4l2loopback*'                    # Fedora
 ```
 
 Files created outside this repo: `~/.config/systemd/user/camera-bridge@.service`,
@@ -520,7 +552,7 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 
 ```bash
 dkms status -m ov5693-surface                 # expect: ..., <kver>, x86_64: installed
-modinfo -F filename ov5693 | grep updates/dkms
+modinfo -F parm ov5693 | grep mipi_ctrl00   # the patched driver, wherever DKMS put it
 cat /sys/module/ov5693/parameters/mipi_ctrl00 # expect: 45
 ls /sys/bus/i2c/drivers/ov5693/               # expect an i2c-OVTI5693:00 style entry
 cam -l                                        # expect the front camera listed
@@ -570,9 +602,53 @@ Either disable Secure Boot or sign the module with an enrolled MOK key. Check wi
 was lost — `modinfo ov5693 | grep OVTI5693` must show the alias. Roll back with
 `sudo ./scripts/uninstall.sh` and re-check `patches/0001-add-OVTI5693-acpi-hid.patch`.
 
-**`dmesg` prints nothing as a normal user.** `kernel.dmesg_restrict=1` on Ubuntu; use
+**`dmesg` prints nothing as a normal user.** `kernel.dmesg_restrict=1` on Ubuntu and Fedora; use
 `sudo dmesg`. The test script warns when it is run unprivileged because timeout
 detection goes blind.
+
+**`sudo: apt-get: command not found`.** That is the installer from before multi-distro
+support, which called `apt-get` unconditionally. Update the clone (`git pull`) and
+re-run `./install.sh`; it now detects the package manager from `/etc/os-release`.
+`./install.sh --print-deps` shows which family it picked. On a distribution it does not
+recognise, install the packages by hand and run `PKG_FAMILY=none ./install.sh`.
+
+**`<family> cannot resolve: ...`.** The dry run could not find one of the packages.
+It can also mean the package database is stale, or that the running kernel is older
+than the newest installed one, so its headers are gone from the repositories; reboot
+into the newest kernel and re-run. On Fedora that is almost always v4l2loopback without
+RPM Fusion; on RHEL, Alma or Rocky it is `dkms` without EPEL, or v4l2loopback without
+RPM Fusion for EL. Enable the missing repository, then re-run:
+
+```bash
+dnf repolist                               # expect rpmfusion-free (and epel on EL)
+sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
+```
+
+On RHEL-family systems use the `el` release package from <https://rpmfusion.org>
+after `sudo dnf install epel-release` (Alma, Rocky; RHEL itself needs the EPEL release
+RPM from the Fedora project).
+
+**Fedora: no cameras at all, `cam -l` lists none.** Check `uname -r` first. Without
+`.surface.` in it, the machine booted a stock Fedora kernel. That kernel cannot power
+the sensors: the kernel log shows `int3472-discrete: GPIO type 0x08 unknown`, then
+`ov13858 ... failed with error -5` for the rear camera, and the front one never binds.
+`./install.sh --check` reports the patched ov5693 as not active, because DKMS built it
+only for the kernel that was running at install time.
+
+This is the usual result of a kernel update. Fedora's `/etc/sysconfig/kernel` ships
+`UPDATEDEFAULT=yes` with `DEFAULTKERNEL=kernel-core`, so every stock kernel update
+makes itself the default boot entry, above an installed linux-surface kernel. Make
+linux-surface the default once, and make it the kernel type new installs default to:
+
+```bash
+sudo grubby --set-default "$(printf '%s\n' /boot/vmlinuz-*.surface.* | sort -V | tail -1)"
+sudo sed -i 's/^DEFAULTKERNEL=.*/DEFAULTKERNEL=kernel-surface-core/' /etc/sysconfig/kernel
+sudo grubby --default-kernel                 # expect a .surface. kernel
+```
+
+Reboot, then `./install.sh --check`. DKMS and akmods build both modules for the
+surface kernel automatically on its first boot; if `--check` still reports them
+missing, re-run `./install.sh`.
 
 **Wrong camera picked by the test.** `cam -l`, then
 `sudo OV5693_CAM=<index> ./tests/test-capture.sh`.

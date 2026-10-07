@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# One-command setup for the Surface Pro 9 cameras on Ubuntu.
+# One-command setup for the Surface Pro 9 cameras on Debian/Ubuntu, Fedora, Arch
+# and openSUSE (and their derivatives).
 #
 #   mkdir -p ~/projects && cd ~/projects
 #   git clone https://github.com/el-amin-dev/sp9-ov5693-dkms
@@ -9,8 +10,9 @@
 # Keep the clone where it is: the user service points at this directory, so moving
 # or deleting it stops the cameras until ./install.sh is re-run.
 #
-#   ./install.sh --check   # report state, change nothing
-#   ./uninstall.sh         # undo it
+#   ./install.sh --check       # report state, change nothing
+#   ./install.sh --print-deps  # the packages this distro would get, change nothing
+#   ./uninstall.sh             # undo it
 #
 # What it sets up, in order:
 #   0. build tools, kernel headers, GStreamer and V4L2 utilities
@@ -30,27 +32,9 @@ readonly COMMANDS=(start-camera stop-camera surface-camera)
 # Marker so the PATH line is added once and can be found again to remove it.
 readonly PATH_MARKER="# added by sp9-ov5693-dkms (surface camera commands)"
 
-# Everything the pipeline needs, by the command it provides:
-#   dkms/build-essential/headers -> building both out-of-tree modules
-#   gstreamer1.0-*               -> pipewiresrc, videoconvert/videoscale, v4l2sink
-#   v4l-utils                    -> v4l2-ctl, used to find and inspect the devices
-#   pipewire-bin                 -> pw-dump, used to locate the camera nodes
-#   psmisc                       -> fuser, how the bridge sees who has a
-#                                   camera open
-#   libcamera-tools              -> cam, used by the test scripts
-#   python3-gi, gir1.2-gstreamer -> the GObject bindings surfacecam.pipeline
-#                                   imports; present by default on an Ubuntu
-#                                   desktop, absent on a minimal install
-#   python3                      -> surfacecam/, which the bridge and this script
-#                                   both read their camera facts from
-readonly DEPS=(
-	dkms build-essential python3
-	gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
-	gstreamer1.0-pipewire
-	v4l-utils pipewire-bin libcamera-tools psmisc
-	python3-gi gir1.2-gstreamer-1.0
-	v4l2loopback-dkms v4l2loopback-utils
-)
+# Package names per distro family live in scripts/pkg.sh.
+# shellcheck source=scripts/pkg.sh
+source scripts/pkg.sh
 
 log() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 ok() { printf '\033[1;32m  ok\033[0m %s\n' "$*"; }
@@ -93,25 +77,6 @@ load_camera_config() {
 	# too: continuing with an empty camera list would silently install nothing.
 	[[ ${#CAMERAS[@]} -gt 0 && ${#CAMERAS[@]} -eq ${#LABELS[@]} ]] ||
 		die "surfacecam.config gave ${#CAMERAS[@]} camera(s) and ${#LABELS[@]} label(s); cannot continue"
-}
-
-# Install packages, but never at the cost of removing any. On this distro pulling
-# the wrong package can take the desktop with it, so a non-empty removal list is
-# a hard stop rather than a prompt.
-apt_install() {
-	local want=("$@") missing=() removals p
-	for p in "${want[@]}"; do
-		dpkg -l "${p}" 2>/dev/null | grep -q '^ii' || missing+=("${p}")
-	done
-	[[ ${#missing[@]} -eq 0 ]] && { ok "already present: ${want[*]}"; return 0; }
-
-	removals="$(apt-get -s install "${missing[@]}" 2>/dev/null | grep -c '^Remv' || true)"
-	[[ ${removals} -eq 0 ]] ||
-		die "apt would REMOVE ${removals} package(s); refusing. Check: apt-get -s install ${missing[*]}"
-
-	need_sudo "install ${missing[*]}"
-	sudo apt-get install -y "${missing[@]}" || die "package install failed: ${missing[*]}"
-	ok "installed ${missing[*]}"
 }
 
 # Make sure ~/.local/bin is on PATH for whatever shell the user runs.
@@ -162,10 +127,15 @@ device_for() {
 	return 1
 }
 
+# Same test as module_is_patched in scripts/common.sh (which this script does not
+# source): only the patched driver has a mipi_ctrl00 parameter, wherever the
+# distro's DKMS chose to install it.
+patched_module_installed() { modinfo -F parm ov5693 2>/dev/null | grep -q '^mipi_ctrl00:'; }
+
 check() {
 	local i cam want dev
 	log "State"
-	if modinfo -F filename ov5693 2>/dev/null | grep -q updates/dkms; then
+	if patched_module_installed; then
 		ok "patched ov5693 active"
 		[[ -r /sys/module/ov5693/parameters/mipi_ctrl00 ]] &&
 			ok "mipi_ctrl00 = $(cat /sys/module/ov5693/parameters/mipi_ctrl00)"
@@ -194,20 +164,65 @@ check() {
 	done
 }
 
+# Detected up front so --print-deps works without sudo or a package manager.
+FAMILY="$(detect_family)" || FAMILY=""
+
+print_deps() {
+	[[ -n ${FAMILY} && ${FAMILY} != none ]] && deps_for "${FAMILY}" >/dev/null ||
+		{ manual_needs >&2; exit 1; }
+	echo "family: ${FAMILY}"
+	echo "deps: $(deps_for "${FAMILY}")"
+	echo "headers: $(headers_pkg "${FAMILY}")"
+	echo "loopback: $(loopback_pkgs "${FAMILY}")"
+}
+
 case "${1:-}" in
 --check) check; exit 0 ;;
+--print-deps) print_deps; exit 0 ;;
 --uninstall) exec ./uninstall.sh ;;
 "") ;;
-*) die "usage: $0 [--check]" ;;
+*) die "usage: $0 [--check | --print-deps]" ;;
 esac
 
 # --- 0. dependencies ---------------------------------------------------------
 log "Step 0/4: dependencies"
-apt_install "${DEPS[@]}"
-# Headers must match the running kernel, whatever it is.
-apt_install "linux-headers-$(uname -r)"
+# Checked before installing anything: with Secure Boot on, both out-of-tree
+# modules need a signing key enrolled in MOK, or they are refused at load time
+# after dozens of packages have already gone in.
+if mokutil --sb-state 2>/dev/null | grep -q 'SecureBoot enabled'; then
+	warn "Secure Boot is ON: ov5693 and v4l2loopback load only if signed with an enrolled MOK key"
+	warn "see README 'Requirements'; continuing, but expect a module load failure otherwise"
+fi
+if [[ ${FAMILY} == none ]]; then
+	warn "PKG_FAMILY=none: skipping package installation, assuming it was done by hand"
+elif [[ -z ${FAMILY} ]] || ! deps_for "${FAMILY}" >/dev/null; then
+	manual_needs >&2
+	exit 1
+else
+	ok "package family: ${FAMILY}"
+	# Only demand RPM Fusion when there is actually something to fetch from it;
+	# a loopback installed another way (COPR, by hand) is fine as it is.
+	if [[ ${FAMILY} == dnf ]]; then
+		for p in $(loopback_pkgs dnf); do
+			pkg_installed dnf "${p}" || { ensure_rpmfusion; break; }
+		done
+	fi
+	# Headers first, and on their own: they must match the running kernel, and
+	# installing them before akmod-v4l2loopback stops its kernel-devel dependency
+	# being resolved against some other kernel.
+	# shellcheck disable=SC2046  # deliberate word splitting into package names
+	pkg_install "${FAMILY}" "$(headers_pkg "${FAMILY}")" $(headers_matched_pkg "${FAMILY}")
+	# shellcheck disable=SC2046
+	pkg_install "${FAMILY}" $(deps_for "${FAMILY}") $(loopback_pkgs "${FAMILY}")
+	# akmods normally builds at boot; build now so modprobe finds it. A build the
+	# package's own scriptlet started may be running too -- akmods serialises them.
+	if [[ ${FAMILY} == dnf ]] && ! modinfo v4l2loopback >/dev/null 2>&1; then
+		need_sudo "build v4l2loopback with akmods"
+		sudo akmods --force --kernels "$(uname -r)" || die "akmods could not build v4l2loopback for $(uname -r)"
+	fi
+fi
 [[ -d "/lib/modules/$(uname -r)/build" ]] ||
-	die "no kernel headers for $(uname -r) even after install; is this a custom kernel?"
+	die "no kernel headers for $(uname -r) even after install; a custom kernel, or one older than the installed one (reboot into the newest)?"
 ok "kernel headers present for $(uname -r)"
 
 # Safe now: python3 is installed.
@@ -216,7 +231,7 @@ ok "cameras: ${CAMERAS[*]}"
 
 # --- 1. the kernel module ----------------------------------------------------
 log "Step 1/4: patched ov5693 kernel module"
-if modinfo -F filename ov5693 2>/dev/null | grep -q updates/dkms; then
+if patched_module_installed; then
 	ok "already installed and active"
 else
 	need_sudo "install the ov5693 DKMS module"

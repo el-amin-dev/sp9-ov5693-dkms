@@ -1,15 +1,22 @@
 # Surface Pro 9 camera fix for Linux (OV5693 + Intel IPU6)
 
-**Working front and rear cameras on a Surface Pro 9 under Linux — in Chrome, Firefox,
-Zoom, Teams, Google Meet and GNOME Snapshot.** Patched `ov5693` sensor driver packaged
-for DKMS, plus the userspace bridge that makes the cameras actually usable by ordinary
-apps.
+**Surface Pro 9 camera not working on Linux? This fixes it.** It gets the front and rear
+webcams working in Chrome, Firefox, Zoom, Microsoft Teams, Google Meet and GNOME
+Snapshot, on **Ubuntu, Fedora, Arch, openSUSE** and their derivatives (Linux Mint,
+Pop!_OS, Manjaro, EndeavourOS, ...). One command installs a patched `ov5693` sensor
+driver through DKMS, plus the bridge that makes the camera visible to ordinary apps.
 
-Developed on a Surface Pro 9 running Ubuntu 26.04 with the
-[linux-surface](https://github.com/linux-surface/linux-surface) kernel. Nothing here is
-model-specific: it applies to any Surface pairing an OmniVision OV5693 with an Intel
-IPU6. The installer is not Ubuntu-specific either: it drives `apt`, `dnf`, `pacman` or
-`zypper`, whichever your distribution uses (see [What it installs](#what-it-installs)).
+![Front camera of a Surface Pro 9 working on Fedora Linux, live in GNOME Snapshot](docs/images/surface-pro-9-linux-camera-working.jpg)
+
+<sub>The front camera live in GNOME Snapshot on a Surface Pro 9: Fedora 44, linux-surface
+kernel 6.19.8, after `./install.sh` and `start-camera`.</sub>
+
+Developed on a Surface Pro 9 with the
+[linux-surface](https://github.com/linux-surface/linux-surface) kernel, and tested end
+to end on Ubuntu 26.04 and Fedora 44. Nothing here is model-specific: it applies to any
+Surface pairing an OmniVision OV5693 with an Intel IPU6. The installer uses `apt`, `dnf`,
+`pacman` or `zypper`, whichever your distribution has (see
+[What it installs](#what-it-installs)).
 
 ## Do these symptoms match?
 
@@ -106,9 +113,12 @@ use the bridge alone.
 
 ## Status
 
-- verified on: Surface Pro 9, Ubuntu 26.04, kernel 6.19.8-surface-3
+- verified on a Surface Pro 9 with:
+  - Ubuntu 26.04, kernel `6.19.8-surface-3`
+  - Fedora 44, kernel `6.19.8-3.surface.fc43`
+- Arch and openSUSE: package lists and installer dry runs verified, not yet run on hardware
 - front and rear cameras both working, surviving reboots
-- 39 unit tests, no hardware and no pytest required
+- 82 unit tests, no hardware and no pytest required
 
 ## Installing in detail
 
@@ -338,14 +348,81 @@ Unit tests, standard library only — no pytest, no camera, no root:
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-39 tests over camera identification against a recorded `pw-dump` (including a
-regression test for the back camera vanishing when libcamera reported no
-`api.libcamera.location`), the WirePlumber nudge guards, the pipeline description,
-and the on-demand policy — which is tested but not enabled, see above.
+82 tests, covering:
+
+- camera identification against a recorded `pw-dump`, including a regression test
+  for the back camera vanishing when libcamera reported no `api.libcamera.location`
+- the WirePlumber nudge guards
+- the pipeline description
+- the on-demand policy, which is tested but not enabled (see above)
+- distribution detection against 11 `os-release` files, and each family's package
+  names
+- the dry-run parsers behind the installer's never-remove rule, including non-English
+  and unrecognised output
 
 The hardware tests — capture, rollback, and the browser probe — need the camera and,
 for `dmesg`, root. See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for those and for the rest
 of the setup, run, and debug commands.
+
+## FAQ
+
+### Why does the Surface Pro 9 camera not work on Linux?
+
+The sensor driver in the mainline kernel never programs one register (`MIPI_CTRL00`),
+so the Intel IPU6 never receives a frame and every capture hangs. Even with that fixed,
+the camera is only exposed through libcamera and PipeWire, which Chrome, Firefox, Zoom
+and Teams do not use. Both are explained in
+[What was actually wrong](#what-was-actually-wrong); this repo fixes both.
+
+### Which Linux distributions does this work on?
+
+Anything based on Debian/Ubuntu, Fedora/RHEL, Arch or openSUSE: Ubuntu, Kubuntu,
+Linux Mint, Pop!_OS, Debian, Fedora, Alma, Rocky, Arch, Manjaro, EndeavourOS, openSUSE
+Tumbleweed and Leap. On other distributions, install the packages by hand and run
+`PKG_FAMILY=none ./install.sh` (see [What it installs](#what-it-installs)).
+
+### Do I need the linux-surface kernel?
+
+Yes. A stock distribution kernel cannot power the Surface camera sensors. On stock
+Fedora the kernel log shows `int3472-discrete: GPIO type 0x08 unknown`, the rear
+`ov13858` fails with `error -5`, and `cam -l` lists no cameras. Install
+[linux-surface](https://github.com/linux-surface/linux-surface/wiki/Installation-and-Setup),
+boot it, check that `uname -r` contains `surface`, then run `./install.sh`. On Fedora,
+make sure kernel updates do not switch you back to the stock kernel; see the
+troubleshooting notes in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
+### Does it work on the Surface Pro 8, Pro 10 or Surface Laptop?
+
+Only the Pro 9 has been tested. The fix applies to any Surface whose front camera is an
+OV5693 behind an Intel IPU6. To check yours:
+
+```bash
+ls /sys/bus/i2c/devices/ | grep OVTI5693    # the front sensor
+lsmod | grep intel_ipu6                     # the IPU6 driver
+```
+
+If both print something, it is worth trying: the installer verifies the result with a
+real capture, and rolls the kernel module back on its own if that fails.
+
+### The camera picture is black, or upside down
+
+Both are known and handled. Below about 1296px wide the sensor returns black frames,
+so the bridge always captures at 1920x1080 and serves 1280x720. The rear sensor is
+mounted upside down, so the bridge rotates it. If you still see either one, run
+`surface-camera status` and see [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
+### Is it safe to install? How do I remove it?
+
+The stock driver is shadowed, never deleted, and `./uninstall.sh --all` puts
+everything back. The kernel module install compiles and tests the module before
+installing it, and rolls back on any failure. The package step refuses to run if your
+package manager would remove anything. The installer never edits `/boot` or your
+bootloader.
+
+### Does it work with Secure Boot?
+
+Only if the DKMS modules are signed with a key enrolled in MOK. The simplest route is
+to turn Secure Boot off; the installer warns you if it is on.
 
 ## Documentation
 

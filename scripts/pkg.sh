@@ -146,13 +146,15 @@ headers_pkg() {
 # dnf only: akmods requires kernel-devel-matched, and the stock one requires the
 # stock kernel-core -- on a linux-surface system dnf would satisfy that by
 # installing a second, stock kernel. Naming the running kernel's own
-# -devel-matched in the same transaction stops that. Empty for the stock kernel.
+# -devel-matched in the same transaction stops that. It is pinned to the running
+# kernel's exact version: unversioned, dnf picks the newest, which requires
+# (and so installs) a newer kernel. Empty for the stock kernel.
 headers_matched_pkg() {
 	local name
 	[[ $1 == dnf ]] || return 0
 	name="$(rpm -qf --qf '%{NAME}' "/lib/modules/${PKG_KVER}/vmlinuz" 2>/dev/null)" || return 0
 	name="${name%-core}"
-	[[ -n ${name} && ${name} != kernel ]] && echo "${name}-devel-matched"
+	[[ -n ${name} && ${name} != kernel ]] && echo "${name}-devel-matched-${PKG_KVER}"
 	return 0
 }
 

@@ -14,7 +14,7 @@
 # a known libcamera limitation, not a driver regression -- it is measured and
 # reported, never failed on.
 #
-# Needs root for dmesg (kernel.dmesg_restrict=1 on Ubuntu).
+# Needs root for dmesg (kernel.dmesg_restrict=1 on Ubuntu and Fedora).
 #
 # Env overrides:
 #   OV5693_CAM    camera index or id substring (default: auto-detected)

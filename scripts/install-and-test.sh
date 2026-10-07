@@ -48,7 +48,7 @@ rollback() {
 # working installation (including its builds for every other kernel).
 log "Preflight"
 [[ -d "/lib/modules/${KVER}/build" ]] ||
-	die "no kernel headers for ${KVER} (install linux-headers-* for the running kernel)"
+	die "no kernel headers for ${KVER} (./install.sh --print-deps names the package)"
 command -v dkms >/dev/null || die "dkms is not installed"
 command -v cam >/dev/null || warn "libcamera's 'cam' is missing -- install/verify will run, capture tests will be skipped"
 grep -qi surface /sys/class/dmi/id/product_name 2>/dev/null ||

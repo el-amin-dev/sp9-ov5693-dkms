@@ -14,7 +14,14 @@ readonly USER_UNIT="${HOME}/.config/systemd/user/camera-bridge@.service"
 readonly BIN_DIR="${HOME}/.local/bin"
 readonly COMMANDS=(start-camera stop-camera surface-camera)
 readonly PATH_MARKER="# added by sp9-ov5693-dkms (surface camera commands)"
-readonly PKGS=(v4l2loopback-dkms v4l2loopback-utils)
+# shellcheck source=scripts/pkg.sh
+source scripts/pkg.sh
+FAMILY="$(detect_family)" || FAMILY=""
+# Only the loopback packages: everything else install.sh pulled in is ordinary
+# system software other things may depend on.
+PKGS=()
+[[ -n ${FAMILY} ]] && read -r -a PKGS <<<"$(loopback_installed "${FAMILY}" 2>/dev/null | tr '\n' ' ')"
+readonly FAMILY PKGS
 
 log() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 ok() { printf '\033[1;32m  ok\033[0m %s\n' "$*"; }
@@ -94,7 +101,7 @@ if [[ ${all} -eq 0 ]]; then
 	echo
 	ok "Done. Kept on purpose:"
 	echo "     - the patched ov5693 module (the actual camera fix)"
-	echo "     - ${PKGS[*]}"
+	[[ ${#PKGS[@]} -gt 0 ]] && echo "     - ${PKGS[*]}"
 	echo "     Remove those too with: ./uninstall.sh --all"
 	exit 0
 fi
@@ -105,15 +112,12 @@ need_sudo "remove the ov5693 DKMS module"
 sudo ./scripts/uninstall.sh || warn "ov5693 removal reported an error"
 
 log "Removing packages"
-# Only ever remove what we installed, and never let apt take anything else with
-# it -- on this distro that can mean the desktop.
-removals="$(apt-get -s remove "${PKGS[@]}" 2>/dev/null | grep -c '^Remv' || true)"
-if [[ ${removals} -gt ${#PKGS[@]} ]]; then
-	warn "apt would remove ${removals} packages, more than the ${#PKGS[@]} we installed; skipping"
-	warn "inspect by hand: apt-get -s remove ${PKGS[*]}"
+# Only ever remove what we installed, and never let the package manager take
+# anything else with it -- that can mean the desktop.
+if [[ ${#PKGS[@]} -eq 0 ]]; then
+	warn "no package family (unsupported distribution or PKG_FAMILY=none); remove the v4l2loopback packages by hand"
 else
-	need_sudo "remove ${PKGS[*]}"
-	sudo apt-get remove -y "${PKGS[@]}" || warn "package removal reported an error"
+	pkg_remove "${FAMILY}" "${PKGS[@]}"
 fi
 
 echo
